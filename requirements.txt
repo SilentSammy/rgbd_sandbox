@@ -1,0 +1,5 @@
+numpy
+rosbags
+opencv-python
+matplotlib
+open3d>=0.20,<0.21
