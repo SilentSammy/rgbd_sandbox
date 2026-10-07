@@ -1,583 +1,184 @@
-"""Browse an RGB-D ``.db3`` recording using OpenCV windows.
-
-Run with::
-
-    python rgbd_db3_viewer.py recordings/recording.db3
-
-Focus either image window and press ``n``, ``p``, or ``q``. A background worker
-automatically builds the calibrated depth/color correspondence map for the
-newest displayed frame.
-"""
-
-from __future__ import annotations
-
-import argparse
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
-from pathlib import Path
+"""RGB-D viewer with hover inspection. Focus either window and press n, p, or q."""
 
 import cv2
 import numpy as np
+from time import perf_counter
 
-from rgbd_db3_reader import (
-    DepthColorProjector,
-    ProjectionMetrics,
-    RigidTransform,
-    RGBDDB3Reader,
-    RGBDFrame,
-)
+from rgbd_projection import Projector
 
 
-COLOR_WINDOW = "RGB-D Viewer - Color"
-DEPTH_WINDOW = "RGB-D Viewer - Depth"
-WINDOW_NAMES = (COLOR_WINDOW, DEPTH_WINDOW)
-
-
-@dataclass
-class DisplayPane:
-    """One native-resolution image and its scaled display representation."""
-
-    name: str
-    native_bgr: np.ndarray
-    display_bgr: np.ndarray
-    scale_x: float
-    scale_y: float
-    cursor_native: tuple[int, int] | None = None
-    mouse_display: tuple[int, int] | None = None
-
-    @classmethod
-    def create(
-        cls,
-        name: str,
-        native_bgr: np.ndarray,
-        maximum_height: int,
-    ) -> DisplayPane:
-        native_height, native_width = native_bgr.shape[:2]
-        display_height = min(native_height, maximum_height)
-        scale = display_height / native_height
-        display_width = max(1, round(native_width * scale))
-
-        if (display_width, display_height) == (native_width, native_height):
-            displayed = native_bgr.copy()
-        else:
-            displayed = cv2.resize(
-                native_bgr,
-                (display_width, display_height),
-                interpolation=cv2.INTER_AREA,
-            )
-
-        return cls(
-            name=name,
-            native_bgr=native_bgr,
-            display_bgr=displayed,
-            scale_x=display_width / native_width,
-            scale_y=display_height / native_height,
-        )
-
-    def to_native(self, display_x: int, display_y: int) -> tuple[int, int]:
-        """Convert display coordinates into clipped native-image coordinates."""
-
-        height, width = self.native_bgr.shape[:2]
-        native_x = int(np.clip(round(display_x / self.scale_x), 0, width - 1))
-        native_y = int(np.clip(round(display_y / self.scale_y), 0, height - 1))
-        return native_x, native_y
-
-    def to_display(self, native_x: int, native_y: int) -> tuple[int, int]:
-        """Convert native-image coordinates into clipped display coordinates."""
-
-        height, width = self.display_bgr.shape[:2]
-        display_x = int(np.clip(round(native_x * self.scale_x), 0, width - 1))
-        display_y = int(np.clip(round(native_y * self.scale_y), 0, height - 1))
-        return display_x, display_y
-
-
-class OpenCVRGBDViewer:
-    """Render linked color and depth views using OpenCV HighGUI."""
-
-    def __init__(
-        self,
-        projector: DepthColorProjector,
-        *,
-        display_height: int = 800,
-        depth_min_m: float = 0.25,
-        depth_max_m: float = 2.0,
-    ) -> None:
-        if display_height <= 0:
-            raise ValueError("display_height must be positive")
-        if depth_max_m <= depth_min_m:
-            raise ValueError("depth_max_m must be greater than depth_min_m")
-
-        self.projector = projector
-        self.display_height = display_height
-        self.depth_min_m = depth_min_m
-        self.depth_max_m = depth_max_m
-        self.frame: RGBDFrame | None = None
-        self.depth_meters: np.ndarray | None = None
-        self.panes: dict[str, DisplayPane] = {}
-        self.metrics: ProjectionMetrics | None = None
-        self._active_window: str | None = None
-        self._windows_created = False
-        self._generation = 0
-        self._map_future: Future[
-            tuple[int, DepthColorProjector, ProjectionMetrics]
-        ] | None = None
-        self._map_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="rgbd-map",
-        )
-
-    @property
-    def mapping_ready(self) -> bool:
-        """Whether correspondence data exists for the displayed frame."""
-
-        return self.metrics is not None
-
-    @property
-    def mapping_in_progress(self) -> bool:
-        """Whether the current frame is waiting for its background map."""
-
-        return self._map_future is not None and not self._map_future.done()
-
-    def create_windows(self) -> None:
-        """Create both OpenCV windows and register their mouse callbacks."""
-
-        for window_name in WINDOW_NAMES:
-            cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-            cv2.setMouseCallback(window_name, self._on_mouse, window_name)
-        self._windows_created = True
-
-    def set_frame(self, frame: RGBDFrame) -> None:
-        """Display a new frame and invalidate the previous correspondence map."""
-
-        self.frame = frame
-        self.depth_meters = frame.depth_meters
-        self.metrics = None
-        self._generation += 1
-        self._active_window = None
-        self.panes = {
-            COLOR_WINDOW: DisplayPane.create(
-                COLOR_WINDOW,
-                self._color_visualization(frame),
-                self.display_height,
-            ),
-            DEPTH_WINDOW: DisplayPane.create(
-                DEPTH_WINDOW,
-                self._depth_visualization(self.depth_meters),
-                self.display_height,
-            ),
-        }
-        self._schedule_map()
-
-    def poll_map(self) -> ProjectionMetrics | None:
-        """Adopt a completed background map if it belongs to this frame."""
-
-        future = self._map_future
-        if future is None or not future.done():
-            return None
-        self._map_future = None
-
-        generation, projector, metrics = future.result()
-        if generation != self._generation:
-            return None
-
-        self.projector = projector
-        self.metrics = metrics
-        self._update_linked_cursors()
-        if self._windows_created:
-            self.show()
-        return metrics
-
-    def close(self) -> None:
-        """Stop accepting map work and finish any running projection safely."""
-
-        if self._map_future is not None:
-            self._map_future.cancel()
-            self._map_future = None
-        self._map_executor.shutdown(wait=True, cancel_futures=True)
-
-    def _schedule_map(self) -> None:
-        """Queue only the newest frame; obsolete queued work is cancelled."""
-
-        if self._map_future is not None:
-            self._map_future.cancel()
-            self._map_future = None
-        if self.frame is None or self.frame.color is None or self.depth_meters is None:
-            return
-
-        generation = self._generation
-        projector = self._new_projector()
-        depth_meters = self.depth_meters
-        color_shape = self.frame.color.shape[:2]
-        self._map_future = self._map_executor.submit(
-            self._build_map,
-            generation,
-            projector,
-            depth_meters,
-            color_shape,
-        )
-
-    def _new_projector(self) -> DepthColorProjector:
-        """Make an isolated projector whose arrays belong to one worker job."""
-
-        transform = RigidTransform(
-            rotation=tuple(
-                tuple(float(value) for value in row) for row in self.projector.rotation
-            ),
-            translation=tuple(float(value) for value in self.projector.translation),
-        )
-        return DepthColorProjector(
-            self.projector.depth_intrinsics,
-            self.projector.color_intrinsics,
-            transform,
-        )
-
-    @staticmethod
-    def _build_map(
-        generation: int,
-        projector: DepthColorProjector,
-        depth_meters: np.ndarray,
-        color_shape: tuple[int, int],
-    ) -> tuple[int, DepthColorProjector, ProjectionMetrics]:
-        metrics = projector.build(depth_meters, color_shape)
-        return generation, projector, metrics
-
-    def show(self) -> None:
-        """Redraw both windows from clean images and the current hover state."""
-
-        for window_name in WINDOW_NAMES:
-            cv2.imshow(window_name, self.render(window_name))
-
-    def render(self, window_name: str) -> np.ndarray:
-        """Return one fully annotated display image."""
-
-        pane = self.panes[window_name]
-        rendered = pane.display_bgr.copy()
-        if pane.cursor_native is not None:
-            self._draw_crosshair(rendered, pane.to_display(*pane.cursor_native))
-        self._draw_annotation(rendered, pane)
-        return rendered
-
-    def windows_open(self) -> bool:
-        """Return false if either OpenCV window has been closed."""
-
-        if not self._windows_created:
-            return False
-        try:
-            return all(
-                cv2.getWindowProperty(name, cv2.WND_PROP_VISIBLE) >= 1
-                for name in WINDOW_NAMES
-            )
-        except cv2.error:
-            # Some HighGUI backends remove a closed window immediately instead
-            # of retaining it with a zero-valued visibility property.
-            return False
-
-    def _on_mouse(
-        self,
-        event: int,
-        display_x: int,
-        display_y: int,
-        _flags: int,
-        window_name: str,
-    ) -> None:
-        if event != cv2.EVENT_MOUSEMOVE or window_name not in self.panes:
-            return
-
-        pane = self.panes[window_name]
-        pane.mouse_display = (display_x, display_y)
-        pane.cursor_native = pane.to_native(display_x, display_y)
-        self._active_window = window_name
-        self._update_linked_cursors()
-        if self._windows_created:
-            self.show()
-
-    def _update_linked_cursors(self) -> None:
-        if self._active_window not in self.panes:
-            return
-
-        source = self.panes[self._active_window]
-        target_name = (
-            DEPTH_WINDOW if self._active_window == COLOR_WINDOW else COLOR_WINDOW
-        )
-        target = self.panes[target_name]
-        target.mouse_display = None
-        target.cursor_native = None
-
-        if not self.mapping_ready or source.cursor_native is None:
-            return
-
-        source_x, source_y = source.cursor_native
-        if self._active_window == DEPTH_WINDOW:
-            target.cursor_native = self.projector.projected_color_pixel(
-                source_x,
-                source_y,
-            )
-        else:
-            target.cursor_native = self.projector.nearest_depth_pixel(
-                source_x,
-                source_y,
-            )
-
-    @staticmethod
-    def _draw_crosshair(image: np.ndarray, point: tuple[int, int]) -> None:
-        x, y = point
-        color = (255, 0, 255)
-        arm = 10
-        gap = 3
-        thickness = 1
-        cv2.line(image, (x - arm, y), (x - gap, y), color, thickness, cv2.LINE_AA)
-        cv2.line(image, (x + gap, y), (x + arm, y), color, thickness, cv2.LINE_AA)
-        cv2.line(image, (x, y - arm), (x, y - gap), color, thickness, cv2.LINE_AA)
-        cv2.line(image, (x, y + gap), (x, y + arm), color, thickness, cv2.LINE_AA)
-
-    def _draw_annotation(self, image: np.ndarray, pane: DisplayPane) -> None:
-        assert self.frame is not None
-
-        if self.metrics is not None:
-            map_text = f"map {self.metrics.total_ms:.1f} ms"
-        elif self.mapping_in_progress:
-            map_text = "building map..."
-        else:
-            map_text = "map unavailable"
-        lines = [
-            f"frame {self.frame.index}  t={self.frame.timestamp_ns / 1e9:.3f}s",
-            map_text,
-        ]
-        if pane.cursor_native is not None:
-            x, y = pane.cursor_native
-            lines.append(f"pixel ({x}, {y})")
-            if pane.name == DEPTH_WINDOW and self.depth_meters is not None:
-                depth = float(self.depth_meters[y, x])
-                lines.append(f"depth {depth:.3f} m" if depth > 0 else "depth invalid")
-        lines.append("n next | p previous | q quit")
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.48
-        thickness = 1
-        padding = 8
-        line_gap = 5
-        text_sizes = [
-            cv2.getTextSize(line, font, font_scale, thickness)[0] for line in lines
-        ]
-        line_height = max(height for _, height in text_sizes)
-        box_width = max(width for width, _ in text_sizes) + 2 * padding
-        box_height = (
-            len(lines) * line_height + (len(lines) - 1) * line_gap + 2 * padding
-        )
-
-        image_height, image_width = image.shape[:2]
-        margin = 8
-        top_left = (margin, margin)
-        bottom_right = (
-            max(margin, image_width - margin - box_width),
-            max(margin, image_height - margin - box_height),
-        )
-
-        # The label lives in the top-left until the pointer enters it. It then
-        # moves to the diagonally opposite corner, leaving the hovered area clear.
-        origin_x, origin_y = top_left
-        if pane.mouse_display is not None:
-            mouse_x, mouse_y = pane.mouse_display
-            over_top_left = (
-                origin_x <= mouse_x <= origin_x + box_width
-                and origin_y <= mouse_y <= origin_y + box_height
-            )
-            if over_top_left:
-                origin_x, origin_y = bottom_right
-
-        cv2.rectangle(
-            image,
-            (origin_x, origin_y),
-            (origin_x + box_width, origin_y + box_height),
-            (0, 0, 0),
-            cv2.FILLED,
-        )
-        baseline_y = origin_y + padding + line_height
-        for line in lines:
-            cv2.putText(
-                image,
-                line,
-                (origin_x + padding, baseline_y),
-                font,
-                font_scale,
-                (255, 255, 255),
-                thickness,
-                cv2.LINE_AA,
-            )
-            baseline_y += line_height + line_gap
-
-    @staticmethod
-    def _color_visualization(frame: RGBDFrame) -> np.ndarray:
-        if frame.color is None:
-            return OpenCVRGBDViewer._placeholder("No paired color frame")
-        if frame.color.ndim == 2:
-            return cv2.cvtColor(frame.color, cv2.COLOR_GRAY2BGR)
-        if frame.color.shape[2] == 4:
-            return cv2.cvtColor(frame.color, cv2.COLOR_RGBA2BGR)
-        return cv2.cvtColor(frame.color, cv2.COLOR_RGB2BGR)
-
-    def _depth_visualization(self, depth_meters: np.ndarray | None) -> np.ndarray:
-        if depth_meters is None:
-            return self._placeholder("No depth frame")
-
-        scaled = (depth_meters - self.depth_min_m) / (
-            self.depth_max_m - self.depth_min_m
-        )
-        depth_u8 = np.clip(scaled * 255, 0, 255).astype(np.uint8)
-        colored = cv2.applyColorMap(depth_u8, cv2.COLORMAP_TURBO)
-        colored[~np.isfinite(depth_meters) | (depth_meters <= 0)] = 0
-        return colored
-
-    @staticmethod
-    def _placeholder(message: str) -> np.ndarray:
-        image = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.putText(
-            image,
-            message,
-            (30, 240),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
+def _resize(image, max_dimension):
+    height, width = image.shape[:2]
+    if max_dimension is None:
         return image
+    scale = max_dimension / max(height, width)
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+    return cv2.resize(image, size, interpolation=interpolation)
 
 
-def print_projection_metrics(frame: RGBDFrame, metrics: ProjectionMetrics) -> None:
-    """Print detailed timing for one background map build."""
-
-    throughput = metrics.valid_points / metrics.total_ms / 1000
-    print(
-        f"frame {frame.index}: reprojection {metrics.total_ms:.2f} ms "
-        f"(project {metrics.projection_ms:.2f} ms, "
-        f"z-buffer {metrics.z_buffer_ms:.2f} ms, "
-        f"{metrics.valid_points:,} valid, {metrics.projected_points:,} in frame, "
-        f"{throughput:.2f} Mpoints/s)"
-    )
+def _native_pixel(x, y, display_shape, native_shape):
+    """Map the center of a display pixel to the corresponding source pixel."""
+    dh, dw = display_shape[:2]
+    nh, nw = native_shape[:2]
+    return min(nw - 1, int((x + 0.5) * nw / dw)), min(nh - 1, int((y + 0.5) * nh / dh))
 
 
-def browse_recording(
-    bag_path: Path,
-    *,
-    rotate_clockwise: bool = True,
-    display_height: int = 800,
-    depth_min_m: float = 0.25,
-    depth_max_m: float = 2.0,
-) -> None:
-    """Open *bag_path* and browse paired frames using OpenCV key events."""
+def _display_pixel(u, v, display_shape, native_shape):
+    dh, dw = display_shape[:2]
+    nh, nw = native_shape[:2]
+    x, y = round((u + 0.5) * dw / nw - 0.5), round((v + 0.5) * dh / nh - 0.5)
+    return int(np.clip(x, 0, dw - 1)), int(np.clip(y, 0, dh - 1))
 
-    with RGBDDB3Reader(bag_path, rotate_clockwise=rotate_clockwise) as reader:
-        if len(reader) == 0:
-            print("The recording contains no paired frames.")
+
+def _depth_pixel(inverse, u, v, radius=3):
+    """Nearest measured inverse-map entry within radius RGB pixels, or None."""
+    h,w = inverse.shape[:2]
+    x0,y0 = max(0,u-radius),max(0,v-radius)
+    patch = inverse[y0:min(h,v+radius+1),x0:min(w,u+radius+1)]
+    ys,xs = np.nonzero(patch[:,:,0] >= 0)
+    distance = (xs+x0-u)**2 + (ys+y0-v)**2
+    within = distance <= radius**2
+    if not np.any(within):
+        return None
+    nearest = np.argmin(np.where(within,distance,np.inf))
+    return patch[ys[nearest],xs[nearest]], distance[nearest] != 0
+
+
+def view(source, *, max_dimension=None, depth_range=(0.25, 2.0)):
+    """Browse source[index] frames with RGB uint8 color and depth in meters.
+
+    n: next, p: previous, q: quit. Closing either window also exits.
+    Hover marks only the other window. RGB lookup uses the nearest measured
+    sample within 3 RGB pixels; approximate matches are labeled in the terminal.
+    Native pixel coordinates/depth in meters are printed in the terminal.
+    source.calibration supplies color/depth Cameras and a depth_to_color matrix.
+    Display resizing and colorization do not modify the source arrays.
+    max_dimension sets each image's longer axis in pixels, including upscaling.
+    Leave it as None to display at native resolution.
+    """
+    count = len(source)
+    if not count:
+        print("No frames to display.")
+        return
+    near, far = depth_range
+    if max_dimension is not None and (not isinstance(max_dimension, int) or max_dimension <= 0):
+        raise ValueError("max_dimension must be a positive integer or None")
+    if not np.isfinite([near, far]).all() or far <= near:
+        raise ValueError("Require finite near < far")
+
+    windows = ("RGB", "Depth")
+    index, displayed = 0, None
+    panes = {}
+    mapping = None
+    inverse = None
+    projector = None
+    calibration = source.calibration
+
+    def on_mouse(event, x, y, flags, name):
+        if event != cv2.EVENT_MOUSEMOVE or name not in panes:
             return
+        image, native = panes[name]
+        height, width = image.shape[:2]
+        if not (0 <= x < width and 0 <= y < height):
+            return
+        u, v = _native_pixel(x, y, image.shape, native.shape)
+        # Clear the previous match; the hovered window uses its native cursor.
+        target = "RGB" if name == "Depth" else "Depth"
+        target_image, target_native = panes[target]
+        overlay = target_image.copy()
+        corresponding = None
+        text = f"Frame {index} | {name} pixel ({u}, {v})"
+        if name == "Depth":
+            meters = float(native[v, u])
+            text += f" | {meters:.3f} m" if np.isfinite(meters) and meters > 0 else " | invalid depth"
+            if np.isfinite(mapping[v,u]).all():
+                corresponding = mapping[v,u]
+        else:
+            match = _depth_pixel(inverse,u,v)
+            if match is not None:
+                corresponding, approximate = match
+                du,dv = corresponding
+                text += f" | depth ({du}, {dv}): {target_native[dv,du]:.3f} m"
+                if approximate:
+                    text += " | nearby sample"
+        if corresponding is not None:
+            point = _display_pixel(*corresponding,target_image.shape,target_native.shape)
+            cv2.drawMarker(overlay,point,(255,0,255),cv2.MARKER_CROSS,15,1)
+        else:
+            text += f" | no {target} match"
+        cv2.imshow(name,image)  # Remove any marker from the hovered window.
+        cv2.imshow(target,overlay)
+        print(f"\r{text:<100}", end="", flush=True)
 
-        fps_text = "unknown" if reader.fps is None else f"{reader.fps:.2f}"
-        print(f"Loaded {len(reader)} frames (approximately {fps_text} FPS).")
-        orientation = "90 degrees clockwise" if rotate_clockwise else "native"
-        print(f"Processing orientation: {orientation}.")
-        print("Focus either image window. Keys: n next, p previous, q quit.")
-        print("Pixel correspondence maps are generated automatically in the background.")
+    try:
+        for name in windows:
+            cv2.namedWindow(name, cv2.WINDOW_AUTOSIZE)
+            cv2.setMouseCallback(name, on_mouse, name)
+        while True:
+            if index != displayed:
+                frame = source[index]
+                if projector is None or projector.depth_shape != frame.depth.shape or projector.color_shape != frame.color.shape[:2]:
+                    projector = Projector(
+                        calibration.depth.K,calibration.color.K,calibration.depth_to_color,
+                        frame.depth.shape,frame.color.shape[:2],
+                        depth_D=calibration.depth.D,color_D=calibration.color.D,
+                        depth_model=calibration.depth.distortion_model,
+                        color_model=calibration.color.distortion_model,
+                    )
+                started = perf_counter()
+                mapping,inverse = projector.build_maps(frame.depth)
+                map_ms = (perf_counter() - started) * 1000
+                color = _resize(cv2.cvtColor(frame.color, cv2.COLOR_RGB2BGR), max_dimension)
+                valid = np.isfinite(frame.depth) & (frame.depth > 0)
+                values = np.where(valid, frame.depth, near)
+                values = np.clip((values - near) / (far - near) * 255, 0, 255)
+                depth = cv2.applyColorMap(values.astype(np.uint8), cv2.COLORMAP_TURBO)
+                depth[~valid] = 0
+                depth = _resize(depth, max_dimension)
+                panes = {"RGB": (color, frame.color), "Depth": (depth, frame.depth)}
+                cv2.imshow(windows[0], color)
+                cv2.imshow(windows[1], depth)
+                print(f"\r{f'Frame {index} | map {map_ms:.1f} ms | hover to inspect':<100}", end="", flush=True)
+                if displayed is None:
+                    cv2.moveWindow(windows[0], 20, 40)
+                    cv2.moveWindow(windows[1], 40 + color.shape[1], 40)
+                displayed = index
 
-        viewer = OpenCVRGBDViewer(
-            reader.make_projector(),
-            display_height=display_height,
-            depth_min_m=depth_min_m,
-            depth_max_m=depth_max_m,
-        )
-        viewer.create_windows()
-        index = 0
-        timing_samples: list[float] = []
-
-        try:
-            while viewer.windows_open():
-                reader.seek(index)
-                ok, frame = reader.read()
-                if not ok or frame is None:
+            key = cv2.waitKey(20)
+            try:
+                if any(cv2.getWindowProperty(name, cv2.WND_PROP_VISIBLE) < 1 for name in windows):
                     break
-                viewer.set_frame(frame)
-                viewer.show()
-
-                change_frame = False
-                while viewer.windows_open() and not change_frame:
-                    metrics = viewer.poll_map()
-                    if metrics is not None:
-                        timing_samples.append(metrics.total_ms)
-                        print_projection_metrics(frame, metrics)
-
-                    key_code = cv2.waitKeyEx(20)
-                    if key_code < 0:
-                        continue
-                    key_value = key_code & 0xFF
-                    if key_value > 0x7F:
-                        continue
-                    key = chr(key_value).lower()
-
-                    if key == "q":
-                        return
-                    if key == "n":
-                        if index == len(reader) - 1:
-                            print("Already at the last frame.")
-                            continue
-                        index += 1
-                        change_frame = True
-                        continue
-                    if key == "p":
-                        if index == 0:
-                            print("Already at the first frame.")
-                            continue
-                        index -= 1
-                        change_frame = True
-        finally:
-            viewer.close()
-            cv2.destroyAllWindows()
-            if timing_samples:
-                samples = np.asarray(timing_samples)
-                print(
-                    f"Reprojection summary ({len(samples)} builds): "
-                    f"mean={samples.mean():.2f} ms, "
-                    f"median={np.median(samples):.2f} ms, "
-                    f"p95={np.percentile(samples, 95):.2f} ms"
-                )
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Browse RGB-D frames with OpenCV.")
-    parser.add_argument("bag", type=Path, help="path to the .db3 recording")
-    parser.add_argument(
-        "--native-orientation",
-        action="store_true",
-        help="do not rotate frames and calibration clockwise",
-    )
-    parser.add_argument(
-        "--display-height",
-        type=int,
-        default=800,
-        help="maximum height of each display window (default: 800)",
-    )
-    parser.add_argument(
-        "--depth-min",
-        type=float,
-        default=0.25,
-        metavar="METERS",
-        help="near end of the depth color scale (default: 0.25)",
-    )
-    parser.add_argument(
-        "--depth-max",
-        type=float,
-        default=2.0,
-        metavar="METERS",
-        help="far end of the depth color scale (default: 2.0)",
-    )
-    args = parser.parse_args()
-    browse_recording(
-        args.bag,
-        rotate_clockwise=not args.native_orientation,
-        display_height=args.display_height,
-        depth_min_m=args.depth_min,
-        depth_max_m=args.depth_max,
-    )
+            except cv2.error:
+                break  # A closed window may already have been removed by its backend.
+            if key < 0:
+                continue
+            key = chr(key & 0xFF).lower()
+            if key == "q":
+                break
+            if key == "n":
+                index = min(index + 1, count - 1)
+            elif key == "p":
+                index = max(index - 1, 0)
+    finally:
+        print()
+        for name in windows:
+            try:
+                cv2.destroyWindow(name)
+            except cv2.error:
+                pass  # The user may already have closed this window.
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    from rgbd_db3_reader import RealSenseReader
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("bag", help="path to a RealSense Viewer .db3 recording")
+    parser.add_argument("--rotations", type=int, choices=range(4), default=0,
+                        help="clockwise quarter-turns: 0, 1, 2, or 3 (default: 0)")
+    parser.add_argument("--max-dimension", type=int,
+                        help="set each image's longer axis in pixels (default: native size)")
+    args = parser.parse_args()
+    with RealSenseReader(args.bag, rotations=args.rotations) as recording:
+        view(recording, max_dimension=args.max_dimension)

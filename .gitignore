@@ -1,2 +1,5 @@
 recordings/
 .venv/
+*.pyc
+*.pyo
+*.pyd
