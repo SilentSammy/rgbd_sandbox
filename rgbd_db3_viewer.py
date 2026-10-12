@@ -1,10 +1,60 @@
-"""RGB-D viewer with hover inspection. Focus either window and press n, p, or q."""
+"""RGB-D viewer with hover inspection and shared keyboard playback controls."""
 
 import cv2
 import numpy as np
 from time import perf_counter
 
 from rgbd_projection import Projector
+
+
+PLAYBACK_HELP = "A reverse | S pause | D play | Q previous | E next | W restart | Esc quit"
+
+
+class Playback:
+    """Start paused; step/restart pause, and playback stops at either end.
+
+    Pace at the recording's FPS, without skipping frames when processing is slow.
+    poll() also returns unhandled keys for each demo's own commands.
+    """
+
+    def __init__(self, source, start_frame=0):
+        self.count = len(source)
+        if not 0 <= start_frame < self.count:
+            raise ValueError(f"start-frame must be between 0 and {self.count - 1}")
+        self.index = self.start_frame = start_frame
+        self.interval = 1 / (source.fps or 30)
+        self.direction = 0
+        self.quit = False
+        self.next_frame = 0
+
+    def seek(self, index):
+        self.index = min(max(index, 0), self.count - 1)
+        self.direction = 0
+
+    def update(self, key=-1, *, now=None):
+        now = perf_counter() if now is None else now
+        command = chr(key & 0xFF).lower() if key >= 0 else ""
+        if command == "\x1b":
+            self.quit = True
+        elif command in ("a", "d"):
+            direction = -1 if command == "a" else 1
+            if direction != self.direction:
+                self.direction = direction
+                self.next_frame = now + self.interval
+        elif command == "s":
+            self.direction = 0
+        elif command in ("q", "e", "w"):
+            self.seek(self.start_frame if command == "w" else
+                      self.index + (-1 if command == "q" else 1))
+        if not self.quit and self.direction and now >= self.next_frame:
+            self.index = min(max(self.index + self.direction, 0), self.count - 1)
+            self.next_frame = now + self.interval
+            if self.index in (0, self.count - 1):
+                self.direction = 0
+        return command
+
+    def poll(self):
+        return self.update(cv2.waitKey(20))
 
 
 def _resize(image, max_dimension):
@@ -45,10 +95,10 @@ def _depth_pixel(inverse, u, v, radius=3):
     return patch[ys[nearest],xs[nearest]], distance[nearest] != 0
 
 
-def view(source, *, max_dimension=None, depth_range=(0.25, 2.0)):
+def view(source, *, max_dimension=None, depth_range=(0.25, 2.0), start_frame=0):
     """Browse source[index] frames with RGB uint8 color and depth in meters.
 
-    n: next, p: previous, q: quit. Closing either window also exits.
+    Uses Playback controls. Closing either window also exits.
     Hover marks only the other window. RGB lookup uses the nearest measured
     sample within 3 RGB pixels; approximate matches are labeled in the terminal.
     Native pixel coordinates/depth in meters are printed in the terminal.
@@ -68,7 +118,8 @@ def view(source, *, max_dimension=None, depth_range=(0.25, 2.0)):
         raise ValueError("Require finite near < far")
 
     windows = ("RGB", "Depth")
-    index, displayed = 0, None
+    playback = Playback(source, start_frame)
+    index, displayed = playback.index, None
     panes = {}
     mapping = None
     inverse = None
@@ -112,6 +163,7 @@ def view(source, *, max_dimension=None, depth_range=(0.25, 2.0)):
         print(f"\r{text:<100}", end="", flush=True)
 
     try:
+        print(PLAYBACK_HELP)
         for name in windows:
             cv2.namedWindow(name, cv2.WINDOW_AUTOSIZE)
             cv2.setMouseCallback(name, on_mouse, name)
@@ -145,21 +197,15 @@ def view(source, *, max_dimension=None, depth_range=(0.25, 2.0)):
                     cv2.moveWindow(windows[1], 40 + color.shape[1], 40)
                 displayed = index
 
-            key = cv2.waitKey(20)
+            playback.poll()
             try:
                 if any(cv2.getWindowProperty(name, cv2.WND_PROP_VISIBLE) < 1 for name in windows):
                     break
             except cv2.error:
                 break  # A closed window may already have been removed by its backend.
-            if key < 0:
-                continue
-            key = chr(key & 0xFF).lower()
-            if key == "q":
+            if playback.quit:
                 break
-            if key == "n":
-                index = min(index + 1, count - 1)
-            elif key == "p":
-                index = max(index - 1, 0)
+            index = playback.index
     finally:
         print()
         for name in windows:
@@ -173,12 +219,13 @@ if __name__ == "__main__":
     import argparse
     from rgbd_db3_reader import RealSenseReader
 
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, epilog=PLAYBACK_HELP)
     parser.add_argument("bag", help="path to a RealSense Viewer .db3 recording")
     parser.add_argument("--rotations", type=int, choices=range(4), default=0,
                         help="clockwise quarter-turns: 0, 1, 2, or 3 (default: 0)")
     parser.add_argument("--max-dimension", type=int,
                         help="set each image's longer axis in pixels (default: native size)")
+    parser.add_argument("--start-frame", type=int, default=0)
     args = parser.parse_args()
     with RealSenseReader(args.bag, rotations=args.rotations) as recording:
-        view(recording, max_dimension=args.max_dimension)
+        view(recording, max_dimension=args.max_dimension, start_frame=args.start_frame)

@@ -1,5 +1,6 @@
 recordings/
 .venv/
+.ocr_models/
 *.pyc
 *.pyo
 *.pyd

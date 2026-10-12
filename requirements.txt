@@ -1,5 +1,7 @@
 numpy
+scipy
 rosbags
 opencv-python
 matplotlib
 open3d>=0.20,<0.21
+rapidocr_onnxruntime>=1.4,<2

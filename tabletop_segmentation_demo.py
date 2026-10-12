@@ -2,7 +2,7 @@
 
 Example::
 
-    python tabletop_segmentation_demo.py recordings/20260924_113104.db3
+    python tabletop_segmentation_demo.py recordings/20261005_195417.db3 --frame 137
 
 The original ``rgbd_db3_viewer.py`` remains independent of this experiment.
 """
@@ -14,14 +14,15 @@ from pathlib import Path
 from time import perf_counter
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.axes import Axes
 
-from rgbd_db3_reader import DepthColorProjector, RGBDDB3Reader, RGBDFrame
+from rgbd_db3_reader import Frame, RealSenseReader
+from rgbd_db3_viewer import Playback, PLAYBACK_HELP, _resize
+from rgbd_projection import Projector
 from rgbd_tabletop_segmentation import (
     TabletopSegmentationParameters,
     TabletopSegmentationResult,
+    bounding_contour,
     segment_tabletop_objects,
 )
 
@@ -42,58 +43,53 @@ OBJECT_COLORS = np.asarray(
         (255, 152, 150),
     ],
     dtype=np.uint8,
-)
+)[:, ::-1].copy()  # RGB palette converted to OpenCV BGR.
 TABLE_COLOR = np.asarray((180, 180, 180), dtype=np.uint8)
 
 
 def _colorize_depth_labels(
-    labels: np.ndarray,
-    table_mask: np.ndarray,
+    result: TabletopSegmentationResult,
 ) -> tuple[np.ndarray, np.ndarray]:
-    overlay = np.zeros((*labels.shape, 3), dtype=np.uint8)
-    visible = table_mask.copy()
-    overlay[table_mask] = TABLE_COLOR
-    for label in np.unique(labels[labels >= 0]):
-        mask = labels == label
-        overlay[mask] = OBJECT_COLORS[int(label) % len(OBJECT_COLORS)]
-        visible |= mask
+    overlay = np.zeros((*result.object_labels.shape, 3), dtype=np.uint8)
+    visible = result.table_mask.copy()
+    overlay[result.table_mask] = TABLE_COLOR
+    for obj in result.objects:
+        mask = np.zeros(result.object_labels.shape, dtype=np.uint8)
+        cv2.fillConvexPoly(mask, obj.contour_depth_pixels, 1)
+        overlay[mask != 0] = OBJECT_COLORS[obj.label % len(OBJECT_COLORS)]
+        visible |= mask != 0
     return overlay, visible
 
 
 def _project_overlay_to_color(
     result: TabletopSegmentationResult,
-    projector: DepthColorProjector,
+    inverse: np.ndarray,
     color_shape: tuple[int, int],
 ) -> tuple[np.ndarray, np.ndarray]:
     color_height, color_width = color_shape
     overlay = np.zeros((color_height, color_width, 3), dtype=np.uint8)
     visible = np.zeros((color_height, color_width), dtype=bool)
 
-    source_labels = result.object_labels.ravel()
-    source_table = result.table_mask.ravel()
-    source_indices = projector.color_to_depth.ravel()
-    has_source = source_indices >= 0
+    has_source = inverse[:, :, 0] >= 0
+    x, y = inverse[has_source].T
+    projected_labels = np.full(color_shape, -1, dtype=np.int32)
+    projected_table = np.zeros(color_shape, dtype=bool)
+    projected_labels[has_source] = result.object_labels[y, x]
+    projected_table[has_source] = result.table_mask[y, x]
 
-    projected_labels = np.full(source_indices.shape, -1, dtype=np.int32)
-    projected_table = np.zeros(source_indices.shape, dtype=bool)
-    projected_labels[has_source] = source_labels[source_indices[has_source]]
-    projected_table[has_source] = source_table[source_indices[has_source]]
-    projected_labels = projected_labels.reshape(color_shape)
-    projected_table = projected_table.reshape(color_shape)
-
-    # A depth sample covers several pixels at the higher color resolution.
-    # Dilating individual masks produces a readable overlay without changing
-    # the calibrated depth-to-color projection itself.
+    # Build the RGB rectangle from projected measured pixels, not from invented
+    # depths inside the filled depth silhouette.
     kernel = np.ones((3, 3), dtype=np.uint8)
     table_dilated = cv2.dilate(projected_table.astype(np.uint8), kernel) != 0
     overlay[table_dilated] = TABLE_COLOR
     visible |= table_dilated
+    padding = round(result.bottom_padding_pixels * color_height / result.object_labels.shape[0])
     for label in np.unique(projected_labels[projected_labels >= 0]):
-        mask = cv2.dilate(
-            (projected_labels == label).astype(np.uint8), kernel
-        ) != 0
-        overlay[mask] = OBJECT_COLORS[int(label) % len(OBJECT_COLORS)]
-        visible |= mask
+        mask = (projected_labels == label).astype(np.uint8)
+        contour = bounding_contour(cv2.findNonZero(mask), color_shape, padding)
+        cv2.fillConvexPoly(mask, contour, 1)
+        overlay[mask != 0] = OBJECT_COLORS[int(label) % len(OBJECT_COLORS)]
+        visible |= mask != 0
     return overlay, visible
 
 
@@ -108,15 +104,15 @@ def _blend(image: np.ndarray, overlay: np.ndarray, mask: np.ndarray) -> np.ndarr
     return base
 
 
-def _print_result(frame: RGBDFrame, result: TabletopSegmentationResult) -> None:
+def _print_result(index: int, result: TabletopSegmentationResult) -> None:
     a, b, c, d = result.plane_model
     timings = ", ".join(
         f"{name}={duration:.1f} ms" for name, duration in result.timings_ms.items()
     )
     print(
-        f"frame {frame.index}: {len(result.objects)} objects | "
+        f"frame {index}: {len(result.objects)} objects | "
         f"valid={result.valid_pixel_count:,}, "
-        f"voxels={result.downsampled_point_count:,}, "
+        f"plane-voxels={result.downsampled_point_count:,}, "
         f"table={result.table_voxel_count:,}, "
         f"candidates={result.candidate_voxel_count:,}, "
         f"noise={result.noise_voxel_count:,}"
@@ -134,67 +130,49 @@ def _print_result(frame: RGBDFrame, result: TabletopSegmentationResult) -> None:
         )
 
 
-def _draw_result(
-    frame: RGBDFrame,
+def _render_result(
+    frame: Frame,
     result: TabletopSegmentationResult,
-    axes: np.ndarray,
-    projector: DepthColorProjector,
-) -> float:
-    if frame.color is None or frame.depth_meters is None:
-        raise ValueError("the demo requires paired color and depth frames")
-
+    projector: Projector,
+    index: int,
+    max_dimension: int | None = None,
+) -> dict[str, np.ndarray]:
     projection_started = perf_counter()
-    projector.build(frame.depth_meters, frame.color.shape[:2])
+    _, inverse = projector.build_maps(frame.depth)
     color_overlay, color_mask = _project_overlay_to_color(
-        result, projector, frame.color.shape[:2]
+        result, inverse, frame.color.shape[:2]
     )
     projection_ms = (perf_counter() - projection_started) * 1000
 
-    depth_overlay, depth_mask = _colorize_depth_labels(
-        result.object_labels, result.table_mask
-    )
-    segmented_depth = np.zeros_like(depth_overlay)
-    segmented_depth[depth_mask] = depth_overlay[depth_mask]
+    depth_overlay, depth_mask = _colorize_depth_labels(result)
+    segmented_depth = depth_overlay.copy()
+    valid = np.isfinite(frame.depth) & (frame.depth > 0)
+    values = np.where(valid, frame.depth, 0.25)
+    values = np.clip((values - 0.25) / (2.0 - 0.25) * 255, 0, 255)
+    depth = cv2.applyColorMap(values.astype(np.uint8), cv2.COLORMAP_TURBO)
+    depth[~valid] = 0
 
-    for axis in axes:
-        axis.clear()
-        axis.axis("off")
-
-    axes[0].imshow(_blend(frame.color, color_overlay, color_mask))
-    axes[0].set_title("Calibrated color overlay")
-
-    axes[1].imshow(
-        np.ma.masked_less_equal(frame.depth_meters, 0),
-        cmap="turbo",
-        vmin=0.25,
-        vmax=2.0,
-    )
-    axes[1].imshow(depth_overlay, alpha=np.where(depth_mask, 0.50, 0.0))
-    axes[1].set_title("Depth + table/object masks")
-
-    axes[2].imshow(segmented_depth)
-    axes[2].set_title(f"{len(result.objects)} object clusters")
     for obj in result.objects:
         u, v = obj.centroid_depth_pixel
-        axes[2].text(
-            u,
-            v,
-            str(obj.label),
-            ha="center",
-            va="center",
-            color="white",
-            fontsize=10,
-            fontweight="bold",
-            bbox={"facecolor": "black", "alpha": 0.7, "edgecolor": "none"},
-        )
+        cv2.putText(segmented_depth, str(obj.label), (round(u), round(v)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
-    axes[0].figure.suptitle(
-        f"Frame {frame.index} | segmentation {result.timings_ms['total']:.1f} ms "
-        f"| projection/overlay {projection_ms:.1f} ms"
-    )
-    axes[0].figure.canvas.draw_idle()
-    plt.pause(0.001)
-    return projection_ms
+    images = {
+        "RGB segmentation": _blend(cv2.cvtColor(frame.color, cv2.COLOR_RGB2BGR),
+                                   color_overlay, color_mask),
+        "Depth segmentation": _blend(depth, depth_overlay, depth_mask),
+        "Object clusters": segmented_depth,
+    }
+    text = f"Frame {index} | {len(result.objects)} objects"
+    for name, image in images.items():
+        image = _resize(image, max_dimension)
+        cv2.putText(image, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(image, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, (255, 255, 255), 1, cv2.LINE_AA)
+        images[name] = image
+    print(f"  projection/overlay: {projection_ms:.1f} ms")
+    return images
 
 
 def run_demo(
@@ -203,62 +181,65 @@ def run_demo(
     *,
     initial_frame: int = 0,
     no_gui: bool = False,
+    max_dimension: int | None = None,
 ) -> None:
-    with RGBDDB3Reader(bag_path, rotate_clockwise=True) as reader:
+    if max_dimension is not None and (not isinstance(max_dimension, int) or max_dimension <= 0):
+        raise ValueError("max_dimension must be a positive integer or None")
+    with RealSenseReader(bag_path, rotations=1) as reader:
         if len(reader) == 0:
             raise ValueError("the recording contains no paired RGB-D frames")
         if not 0 <= initial_frame < len(reader):
             raise ValueError(f"frame must be between 0 and {len(reader) - 1}")
-        if reader.depth_intrinsics is None:
-            raise ValueError("the recording does not contain depth intrinsics")
+        calibration = reader.calibration
+        projector = Projector(
+            calibration.depth.K, calibration.color.K, calibration.depth_to_color,
+            (calibration.depth.height, calibration.depth.width),
+            (calibration.color.height, calibration.color.width),
+            depth_D=calibration.depth.D, color_D=calibration.color.D,
+            depth_model=calibration.depth.distortion_model,
+            color_model=calibration.color.distortion_model,
+        )
+        playback = Playback(reader, initial_frame)
+        index = playback.index
+        displayed = None
+        windows = ("RGB segmentation", "Depth segmentation", "Object clusters")
+        try:
+            if not no_gui:
+                for name in windows:
+                    cv2.namedWindow(name, cv2.WINDOW_AUTOSIZE)
+                print(PLAYBACK_HELP)
+            while True:
+                if index != displayed:
+                    frame = reader[index]
+                    result = segment_tabletop_objects(frame.depth, calibration.depth, parameters)
+                    _print_result(index, result)
+                    if no_gui:
+                        break
+                    images = _render_result(frame, result, projector, index, max_dimension)
+                    offset = 20
+                    for name, image in images.items():
+                        cv2.imshow(name, image)
+                        if displayed is None:
+                            cv2.moveWindow(name, offset, 40)
+                            offset += image.shape[1] + 20
+                    displayed = index
 
-        projector = reader.make_projector()
-        index = initial_frame
-        axes: np.ndarray | None = None
-        if not no_gui:
-            _, axes = plt.subplots(1, 3, figsize=(16, 7))
-            plt.show(block=False)
-            print("Commands: Enter/n = next, p = previous, <number> = jump, q = quit")
-
-        while True:
-            reader.seek(index)
-            ok, frame = reader.read()
-            if not ok or frame is None or frame.depth_meters is None:
-                break
-
-            result = segment_tabletop_objects(
-                frame.depth_meters,
-                reader.depth_intrinsics,
-                parameters,
-            )
-            _print_result(frame, result)
-
-            if no_gui:
-                break
-            assert axes is not None
-            _draw_result(frame, result, axes, projector)
-            if not plt.fignum_exists(axes[0].figure.number):
-                break
-
-            command = input(f"frame {index}/{len(reader) - 1}> ").strip().lower()
-            if command in {"q", "quit", "exit"}:
-                break
-            if command in {"", "n", "next"}:
-                index = min(index + 1, len(reader) - 1)
-            elif command in {"p", "prev", "previous"}:
-                index = max(index - 1, 0)
-            else:
+                playback.poll()
                 try:
-                    requested = int(command)
-                except ValueError:
-                    print("Unknown command. Use Enter/n, p, a frame number, or q.")
-                    continue
-                if 0 <= requested < len(reader):
-                    index = requested
-                else:
-                    print(f"Frame must be between 0 and {len(reader) - 1}.")
-
-    plt.close("all")
+                    if any(cv2.getWindowProperty(name, cv2.WND_PROP_VISIBLE) < 1 for name in windows):
+                        break
+                except cv2.error:
+                    break
+                if playback.quit:
+                    break
+                index = playback.index
+        finally:
+            if not no_gui:
+                for name in windows:
+                    try:
+                        cv2.destroyWindow(name)
+                    except cv2.error:
+                        pass
 
 
 def _positive_float(value: str) -> float:
@@ -270,7 +251,7 @@ def _positive_float(value: str) -> float:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Segment tabletop objects in a recorded RGB-D stream."
+        description="Segment tabletop objects in a recorded RGB-D stream.", epilog=PLAYBACK_HELP
     )
     parser.add_argument(
         "bag",
@@ -279,7 +260,10 @@ def parse_args() -> argparse.Namespace:
         default=Path("recordings/20260924_113104.db3"),
         help="recording path (default: recordings/20260924_113104.db3)",
     )
-    parser.add_argument("--frame", type=int, default=0, help="initial frame index")
+    parser.add_argument("--start-frame", "--frame", dest="start_frame", type=int, default=0,
+                        help="initial frame index")
+    parser.add_argument("--max-dimension", type=int,
+                        help="set each image's longer axis in pixels (default: native size)")
     parser.add_argument(
         "--no-gui",
         action="store_true",
@@ -304,6 +288,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--object-roi-right", type=float, default=0.90)
     parser.add_argument("--plane-threshold", type=_positive_float, default=0.010)
     parser.add_argument("--ransac-iterations", type=int, default=1_000)
+    parser.add_argument("--plane-stride", type=int, default=4,
+                        help="sample every Nth row/column for plane fitting (default: 4)")
+    parser.add_argument("--plane-max-points", type=int, default=12_000,
+                        help="maximum voxel samples for RANSAC (default: 12000)")
     parser.add_argument("--object-min-height", type=float, default=0.010)
     parser.add_argument("--object-max-height", type=float, default=0.40)
     parser.add_argument(
@@ -315,6 +303,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cluster-eps", type=_positive_float, default=0.015)
     parser.add_argument("--cluster-min-points", type=int, default=10)
     parser.add_argument("--min-object-pixels", type=int, default=500)
+    parser.add_argument("--min-object-extent", type=float, default=0.02,
+                        help="minimum longest measured AABB side in meters (default: 0.02)")
+    parser.add_argument("--max-object-extent", type=float, default=0.35,
+                        help="maximum longest measured AABB side in meters (default: 0.35)")
+    parser.add_argument("--bottom-padding-pixels", type=int, default=5,
+                        help="extend rectangles downward in native depth pixels (default: 5)")
     parser.add_argument(
         "--border-margin-pixels",
         type=int,
@@ -343,12 +337,17 @@ def main() -> None:
         object_roi_right=args.object_roi_right,
         plane_distance_threshold=args.plane_threshold,
         ransac_iterations=args.ransac_iterations,
+        plane_stride=args.plane_stride,
+        plane_max_points=args.plane_max_points,
         object_min_height=args.object_min_height,
         object_max_height=args.object_max_height,
         min_object_peak_height=args.min_object_peak_height,
         cluster_eps=args.cluster_eps,
         cluster_min_points=args.cluster_min_points,
         min_object_pixels=args.min_object_pixels,
+        min_object_extent=args.min_object_extent,
+        max_object_extent=args.max_object_extent,
+        bottom_padding_pixels=args.bottom_padding_pixels,
         border_margin_pixels=args.border_margin_pixels,
         split_merged_clusters=not args.no_split_merged,
         merged_cluster_min_width=args.merged_cluster_min_width,
@@ -357,8 +356,9 @@ def main() -> None:
     run_demo(
         args.bag,
         parameters,
-        initial_frame=args.frame,
+        initial_frame=args.start_frame,
         no_gui=args.no_gui,
+        max_dimension=args.max_dimension,
     )
 
 
