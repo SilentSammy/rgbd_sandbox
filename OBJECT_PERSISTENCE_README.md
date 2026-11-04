@@ -1,8 +1,17 @@
 # Object persistence demo
 
+The demo now consumes the source-independent detection-phase pipeline in
+`rgbd_perception.py`; it handles only bag playback and annotations. See
+[PERCEPTION_README.md](PERCEPTION_README.md) for stage APIs and live input usage.
+Console timings separate perception from display projection/drawing.
+
 ```powershell
 python object_persistence_demo.py --start-frame 137
 ```
+
+The detection pipeline now uses half-resolution depth and NumPy voxel
+bookkeeping. Masks and annotations remain native-sized; compare full resolution
+with `--segmentation-scale 1`. Geometry/segmentation can differ at half resolution.
 
 The default bag is `recordings/20261005_195417.db3`. Controls are shared with
 the RGB-D viewer: A reverse, S pause, D play, Q/E previous/next, W restart at

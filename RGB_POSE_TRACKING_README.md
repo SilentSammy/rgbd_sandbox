@@ -1,5 +1,11 @@
 # RGB board pose tracking
 
+For the reusable detection-phase pipeline, estimation and filtering are
+now independent: `BoardPoseEstimator.estimate(rgb)` returns raw tracked-marker
+PnP, and `PoseFilter.update(pose)` applies the three-frame filter.
+`BoardPoseTracker` remains the compatibility composition used by older demos.
+See [PERCEPTION_README.md](PERCEPTION_README.md) for the complete stage contracts.
+
 `board_pose_setup.make_estimator()` now returns `BoardPoseTracker` by default.
 The board-pose, point-memory, and object-persistence demos all use it.
 For an unfiltered comparison, call `make_estimator(camera, tracking=False)`.

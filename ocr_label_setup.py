@@ -8,6 +8,8 @@ LABELS = {
     "Melatonina": ["melatonin"],
     "Ibuprofeno": ["ibuprofen"],
     "Colgate": [],
+    "Diclofenaco": ["diclofenac"],
+    "Supramycina": [],
     "NESCAFÉ": [],
 }
 

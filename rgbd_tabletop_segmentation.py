@@ -1,22 +1,21 @@
 """Inspectable, geometry-only tabletop object segmentation for RGB-D frames.
 
 The implementation deliberately keeps the calibration and image coordinate
-system supplied by :mod:`rgbd_db3_reader`.  It uses Open3D for voxel
-downsampling, RANSAC plane fitting, and DBSCAN clustering, while retaining the
-source depth-pixel indices needed to turn 3-D clusters back into image masks.
-Pixel tracing is restricted to object candidates, rather than the whole scene.
+system supplied by the source. Open3D fits planes and clusters voxel centroids;
+NumPy groups candidate voxels and maps them back to pixels without ragged traces.
+Optional half-resolution processing restores masks/contours to native dimensions.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 
 import cv2
 import numpy as np
 import open3d as o3d
 
-from rgbd_db3_reader import Camera
+from rgbd_types import Camera
 
 
 @dataclass(frozen=True)
@@ -41,11 +40,13 @@ class TabletopSegmentationParameters:
     object_min_height: float = 0.010
     object_max_height: float = 0.40
     min_object_peak_height: float = 0.050
+    max_object_centroid_depth: float = 1.05
     cluster_eps: float = 0.015
     cluster_min_points: int = 10
     min_object_pixels: int = 500
     min_object_extent: float = 0.02
     max_object_extent: float = 0.35
+    max_object_footprint: float | None = None  # Table-plane diameter, meters; None disables.
     bottom_padding_pixels: int = 5
     border_margin_pixels: int = 2
     split_merged_clusters: bool = True
@@ -57,6 +58,9 @@ class TabletopSegmentationParameters:
 
     def validate(self) -> None:
         """Raise ``ValueError`` for parameter combinations that cannot work."""
+
+        if self.max_object_footprint is not None and (not np.isfinite(self.max_object_footprint) or self.max_object_footprint <= 0):
+            raise ValueError('max_object_footprint must be positive or None')
 
         if not 0 < self.min_depth < self.max_depth:
             raise ValueError("depth limits must satisfy 0 < min_depth < max_depth")
@@ -92,6 +96,8 @@ class TabletopSegmentationParameters:
             raise ValueError(
                 "min_object_peak_height must lie inside the object height range"
             )
+        if not self.min_depth < self.max_object_centroid_depth <= self.max_depth:
+            raise ValueError("object centroid depth must lie inside the depth range")
         if self.cluster_eps <= 0:
             raise ValueError("cluster_eps must be positive")
         if self.cluster_min_points <= 0 or self.min_object_pixels <= 0:
@@ -125,6 +131,7 @@ class DetectedObject:
     max_height_above_plane: float
     centroid_depth_pixel: tuple[float, float]
     contour_depth_pixels: np.ndarray  # Enclosing padded rectangle, 4x2 depth (x, y).
+    footprint_diameter: float = 0.0  # Measured diameter projected onto the support plane.
 
 
 @dataclass(frozen=True)
@@ -142,6 +149,21 @@ class TabletopSegmentationResult:
     noise_voxel_count: int
     timings_ms: dict[str, float]
     bottom_padding_pixels: int
+    processing_scale: float = 1.0
+
+
+def footprint_diameter(points, normal):
+    """Rotation-invariant visible footprint; height above the table is removed."""
+    if len(points) < 2:
+        return 0.
+    normal = np.array(normal, dtype=float, copy=True)
+    normal /= np.linalg.norm(normal)
+    u = np.cross(normal, np.eye(3)[np.argmin(np.abs(normal))])
+    u /= np.linalg.norm(u)
+    v = np.cross(normal, u)
+    xy = np.column_stack((points @ u, points @ v)).astype(np.float32)
+    hull = cv2.convexHull(xy).reshape(-1, 2)
+    return float(np.sqrt(np.max(np.sum((hull[:, None]-hull[None, :])**2, axis=2))))
 
 
 def bounding_contour(pixels: np.ndarray, shape: tuple[int, int], bottom_padding: int = 0) -> np.ndarray:
@@ -243,10 +265,68 @@ def _split_at_horizontal_valley(
     return left, right
 
 
+def _voxelize(points, size):
+    """Return voxel centroids and one voxel index per input point."""
+    if not len(points):
+        return np.empty((0, 3), np.float64), np.empty(0, np.intp)
+    origin = points.min(axis=0) - size*0.5
+    cells = np.floor((points-origin)/size).astype(np.int64)
+    dimensions = cells.max(axis=0)+1
+    keys = (cells[:, 0]*dimensions[1]+cells[:, 1])*dimensions[2]+cells[:, 2]
+    _, owners = np.unique(keys, return_inverse=True)
+    counts = np.bincount(owners)
+    centroids = np.column_stack([
+        np.bincount(owners, weights=points[:, axis])/counts for axis in range(3)
+    ])
+    return centroids, owners
+
+
+def _segment_half_resolution(depth, intrinsics, params, plane_model=None):
+    """Reduce depth only; restore native pixel coordinates and original padding."""
+    started = perf_counter()
+    params.validate()
+    height, width = depth.shape
+    reduced = cv2.resize(depth, (width//2, height//2), interpolation=cv2.INTER_NEAREST_EXACT)
+    coarse_params = replace(params,
+        plane_min_inliers=max(3, round(params.plane_min_inliers/4)),
+        min_object_pixels=max(1, round(params.min_object_pixels/4)),
+        split_min_child_pixels=max(1, round(params.split_min_child_pixels/4)),
+        split_min_child_width_pixels=max(1, round(params.split_min_child_width_pixels/2)),
+        border_margin_pixels=-1 if params.border_margin_pixels < 0 else round(params.border_margin_pixels/2),
+        bottom_padding_pixels=0,
+    )
+    result = segment_tabletop_objects(reduced, intrinsics, coarse_params, plane_model=plane_model)
+    restore_started = perf_counter()
+    labels = cv2.resize(result.object_labels, (width, height), interpolation=cv2.INTER_NEAREST)
+    table = cv2.resize(result.table_mask.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST).astype(bool)
+    valid = np.isfinite(depth) & (depth >= params.min_depth) & (depth <= params.max_depth)
+    labels[~valid], table[~valid] = -1, False
+    counts = np.bincount(labels[labels >= 0], minlength=len(result.objects))
+    scale = np.array([width/reduced.shape[1], height/reduced.shape[0]])
+    objects = []
+    for obj in result.objects:
+        left, top = np.floor(obj.contour_depth_pixels[0]*scale).astype(int)
+        right, bottom = np.ceil((obj.contour_depth_pixels[2]+1)*scale).astype(int)-1
+        bottom = min(height-1, bottom+params.bottom_padding_pixels)
+        contour = np.int32([[left, top], [min(width-1, right), top],
+                            [min(width-1, right), bottom], [left, bottom]])
+        center = (np.asarray(obj.centroid_depth_pixel)+.5)*scale-.5
+        objects.append(replace(obj, pixel_count=int(counts[obj.label]),
+                               centroid_depth_pixel=tuple(map(float, center)),
+                               contour_depth_pixels=contour))
+    timings = result.timings_ms.copy()
+    timings["restore_native"] = (perf_counter()-restore_started)*1000
+    timings["total"] = (perf_counter()-started)*1000
+    return replace(result, objects=tuple(objects), object_labels=labels, table_mask=table,
+                   valid_pixel_count=int(valid.sum()), bottom_padding_pixels=params.bottom_padding_pixels,
+                   processing_scale=.5, timings_ms=timings)
+
+
 def segment_tabletop_objects(
     depth_meters: np.ndarray,
     intrinsics: Camera,
     parameters: TabletopSegmentationParameters | None = None,
+    *, processing_scale: float = 1.0, plane_model=None,
 ) -> TabletopSegmentationResult:
     """Separate a dominant support plane and cluster objects above it.
 
@@ -254,7 +334,8 @@ def segment_tabletop_objects(
     positive signed distances point from the table toward the camera, which is
     the expected side for objects resting on a visible tabletop.
     Plane fitting uses a sparse grid; output masks and object measurements
-    retain native depth resolution. No previous-frame geometry is reused.
+    retain native depth resolution. An optional validated depth-camera plane
+    bypasses plane fitting; the caller owns temporal tracking and validation.
     """
 
     params = parameters or TabletopSegmentationParameters()
@@ -263,6 +344,10 @@ def segment_tabletop_objects(
     depth = np.asarray(depth_meters, dtype=np.float32)
     if depth.ndim != 2:
         raise ValueError(f"depth_meters must be a 2-D array, got {depth.shape}")
+    if processing_scale not in (0.5, 1.0):
+        raise ValueError("processing_scale must be 0.5 or 1.0")
+    if processing_scale == 0.5:
+        return _segment_half_resolution(depth, intrinsics, params, plane_model=plane_model)
 
     total_started = perf_counter()
     timings: dict[str, float] = {}
@@ -293,78 +378,89 @@ def segment_tabletop_objects(
     stage_started = perf_counter()
     # Fit geometry on a sparse image grid, retaining all original pixels for
     # object masks and measurements. The wall above the ROI is never voxelized.
-    plane_samples = (
-        (pixel_y >= params.plane_roi_top * height)
-        & (pixel_x % params.plane_stride == 0)
-        & (pixel_y % params.plane_stride == 0)
-    )
-    plane_cloud = o3d.geometry.PointCloud()
-    plane_cloud.points = o3d.utility.Vector3dVector(points[plane_samples].astype(np.float64))
-    down_cloud = plane_cloud.voxel_down_sample(params.voxel_size)
-    down_points = np.asarray(down_cloud.points)
-    if len(down_points) < 3:
-        raise ValueError("fewer than three points remain after voxel downsampling")
-    timings["downsample"] = (perf_counter() - stage_started) * 1000
-
-    stage_started = perf_counter()
-    plane_fit_indices = np.arange(len(down_points))
-    if len(plane_fit_indices) < 3:
-        raise ValueError("fewer than three points lie inside the plane-fitting ROI")
-    sample_fraction = min(1.0, params.plane_max_points / len(plane_fit_indices))
-    if len(plane_fit_indices) > params.plane_max_points:
-        rng = np.random.default_rng(params.random_seed)
-        plane_fit_indices = rng.choice(plane_fit_indices, params.plane_max_points, replace=False)
-    plane_fit_cloud = down_cloud.select_by_index(plane_fit_indices.tolist())
-
-    # A scene can contain several parallel horizontal surfaces. In particular,
-    # some recordings show both the medicine table and a large structure at
-    # the bottom of the image. Peel off several RANSAC planes, keep substantial
-    # planes whose normal points mostly along the rotated image's vertical
-    # axis, and choose the nearest credible one rather than blindly choosing
-    # the globally largest plane.
-    candidates: list[tuple[np.ndarray, int]] = []
-    remaining_plane_cloud = plane_fit_cloud
-    for candidate_index in range(params.plane_candidate_count):
-        if len(remaining_plane_cloud.points) < 3:
-            break
-        o3d.utility.random.seed(params.random_seed + candidate_index)
-        raw_plane, inliers = remaining_plane_cloud.segment_plane(
-            distance_threshold=params.plane_distance_threshold,
-            ransac_n=3,
-            num_iterations=params.ransac_iterations,
+    if plane_model is not None:
+        plane = np.asarray(plane_model, dtype=float).copy()
+        if plane.shape != (4,) or not np.isfinite(plane).all() or np.linalg.norm(plane[:3]) == 0:
+            raise ValueError('Require a finite plane with nonzero normal')
+        plane /= np.linalg.norm(plane[:3])
+        if plane[3] < 0:
+            plane = -plane
+        down_points = np.empty((0, 3))
+        table_voxel_count = 0  # No plane-fitting cloud was built.
+        timings['downsample'] = timings['plane_ransac'] = 0.
+    else:
+        plane_samples = (
+            (pixel_y >= params.plane_roi_top * height)
+            & (pixel_x % params.plane_stride == 0)
+            & (pixel_y % params.plane_stride == 0)
         )
-        if len(inliers) < 3:
-            break
-        candidate = np.asarray(raw_plane, dtype=np.float64)
-        normal_length = float(np.linalg.norm(candidate[:3]))
-        if np.isfinite(normal_length) and normal_length > 0:
-            candidate /= normal_length
-            # The camera is at the origin. Positive d orients the normal from
-            # the support surface toward the camera.
-            if candidate[3] < 0:
-                candidate = -candidate
-            if (
-                len(inliers) >= params.plane_min_inliers * sample_fraction
-                and abs(float(candidate[1])) >= params.support_normal_y_min
-            ):
-                candidates.append((candidate, round(len(inliers) / sample_fraction)))
-        remaining_plane_cloud = remaining_plane_cloud.select_by_index(
-            inliers, invert=True
-        )
+        plane_cloud = o3d.geometry.PointCloud()
+        plane_cloud.points = o3d.utility.Vector3dVector(points[plane_samples].astype(np.float64))
+        down_cloud = plane_cloud.voxel_down_sample(params.voxel_size)
+        down_points = np.asarray(down_cloud.points)
+        if len(down_points) < 3:
+            raise ValueError("fewer than three points remain after voxel downsampling")
+        timings["downsample"] = (perf_counter() - stage_started) * 1000
 
-    if not candidates:
-        raise RuntimeError("RANSAC found no credible support-plane candidate")
-    largest_candidate = max(inlier_count for _, inlier_count in candidates)
-    substantial_candidates = [
-        item
-        for item in candidates
-        if item[1] >= largest_candidate * params.plane_min_inlier_fraction
-    ]
-    plane, table_voxel_count = min(
-        substantial_candidates,
-        key=lambda item: float(item[0][3]),
-    )
-    timings["plane_ransac"] = (perf_counter() - stage_started) * 1000
+        stage_started = perf_counter()
+        plane_fit_indices = np.arange(len(down_points))
+        if len(plane_fit_indices) < 3:
+            raise ValueError("fewer than three points lie inside the plane-fitting ROI")
+        sample_fraction = min(1.0, params.plane_max_points / len(plane_fit_indices))
+        if len(plane_fit_indices) > params.plane_max_points:
+            rng = np.random.default_rng(params.random_seed)
+            plane_fit_indices = rng.choice(plane_fit_indices, params.plane_max_points, replace=False)
+        plane_fit_cloud = down_cloud.select_by_index(plane_fit_indices.tolist())
+
+        # A scene can contain several parallel horizontal surfaces. In particular,
+        # some recordings show both the medicine table and a large structure at
+        # the bottom of the image. Peel off several RANSAC planes, keep substantial
+        # planes whose normal points mostly along the rotated image's vertical
+        # axis, and choose the nearest credible one rather than blindly choosing
+        # the globally largest plane.
+        candidates: list[tuple[np.ndarray, int]] = []
+        remaining_plane_cloud = plane_fit_cloud
+        for candidate_index in range(params.plane_candidate_count):
+            if len(remaining_plane_cloud.points) < 3:
+                break
+            o3d.utility.random.seed(params.random_seed + candidate_index)
+            raw_plane, inliers = remaining_plane_cloud.segment_plane(
+                distance_threshold=params.plane_distance_threshold,
+                ransac_n=3,
+                num_iterations=params.ransac_iterations,
+            )
+            if len(inliers) < 3:
+                break
+            candidate = np.asarray(raw_plane, dtype=np.float64)
+            normal_length = float(np.linalg.norm(candidate[:3]))
+            if np.isfinite(normal_length) and normal_length > 0:
+                candidate /= normal_length
+                # The camera is at the origin. Positive d orients the normal from
+                # the support surface toward the camera.
+                if candidate[3] < 0:
+                    candidate = -candidate
+                if (
+                    len(inliers) >= params.plane_min_inliers * sample_fraction
+                    and abs(float(candidate[1])) >= params.support_normal_y_min
+                ):
+                    candidates.append((candidate, round(len(inliers) / sample_fraction)))
+            remaining_plane_cloud = remaining_plane_cloud.select_by_index(
+                inliers, invert=True
+            )
+
+        if not candidates:
+            raise RuntimeError("RANSAC found no credible support-plane candidate")
+        largest_candidate = max(inlier_count for _, inlier_count in candidates)
+        substantial_candidates = [
+            item
+            for item in candidates
+            if item[1] >= largest_candidate * params.plane_min_inlier_fraction
+        ]
+        plane, table_voxel_count = min(
+            substantial_candidates,
+            key=lambda item: float(item[0][3]),
+        )
+        timings["plane_ransac"] = (perf_counter() - stage_started) * 1000
 
     stage_started = perf_counter()
     signed_full_distances = points @ plane[:3] + plane[3]
@@ -377,16 +473,8 @@ def segment_tabletop_objects(
     )
     candidate_cloud = o3d.geometry.PointCloud()
     candidate_points = points[candidate_indices].astype(np.float64)
-    candidate_cloud.points = o3d.utility.Vector3dVector(candidate_points)
-    trace = []
-    if len(candidate_indices):
-        # Preserve original pixel membership only for the much smaller set
-        # above the plane. Use the same voxel origin as the scene cloud.
-        margin = params.voxel_size * 0.5
-        candidate_cloud, _, trace = candidate_cloud.voxel_down_sample_and_trace(
-            params.voxel_size, candidate_points.min(axis=0) - margin,
-            candidate_points.max(axis=0) + margin, False,
-        )
+    voxel_points, owners = _voxelize(candidate_points, params.voxel_size)
+    candidate_cloud.points = o3d.utility.Vector3dVector(voxel_points)
     candidate_voxel_count = len(candidate_cloud.points)
     timings["height_filter"] = (perf_counter() - stage_started) * 1000
 
@@ -405,18 +493,18 @@ def segment_tabletop_objects(
     timings["dbscan"] = (perf_counter() - stage_started) * 1000
 
     stage_started = perf_counter()
-    # Map each clustered voxel back through Open3D's trace to the original
-    # point list. Values remain -1 for rejected points and DBSCAN noise.
+    # Direct indexing replaces thousands of per-voxel Python/pybind conversions.
+    # Values remain -1 for rejected points and DBSCAN noise.
     point_raw_labels = np.full(len(points), -1, dtype=np.int32)
     point_voxels = np.full(len(points), -1, dtype=np.int32)
-    for candidate_offset, raw_label in enumerate(raw_candidate_labels):
-        if raw_label < 0:
-            continue
-        source_indices = candidate_indices[np.asarray(trace[candidate_offset], dtype=np.int64)]
-        point_raw_labels[source_indices] = raw_label
-        point_voxels[source_indices] = candidate_offset
+    if len(owners):
+        labels = raw_candidate_labels[owners]
+        keep = labels >= 0
+        source_indices = candidate_indices[keep]
+        point_raw_labels[source_indices] = labels[keep]
+        point_voxels[source_indices] = owners[keep]
 
-    accepted: list[tuple[np.ndarray, float, int]] = []
+    accepted: list[tuple[np.ndarray, float, int, float]] = []
     clustered_indices = np.flatnonzero(point_raw_labels >= 0)
     ordered = clustered_indices[np.argsort(point_raw_labels[clustered_indices])]
     boundaries = np.flatnonzero(np.diff(point_raw_labels[ordered])) + 1
@@ -439,19 +527,24 @@ def segment_tabletop_objects(
         for part_indices in _split_at_horizontal_valley(
             member_indices, pixel_x, points, params
         ):
+            if float(points[part_indices, 2].mean()) > params.max_object_centroid_depth:
+                continue
             # Filter measured camera-aligned bounds after splitting, so a merged
             # pair is not discarded before it can become two valid objects.
             extent = float(np.ptp(points[part_indices], axis=0).max())
             if not params.min_object_extent <= extent <= params.max_object_extent:
                 continue
+            footprint = footprint_diameter(points[part_indices], plane[:3])
+            if params.max_object_footprint is not None and footprint > params.max_object_footprint:
+                continue
             part_voxel_count = len(np.unique(point_voxels[part_indices]))
             mean_pixel_x = float(pixel_x[part_indices].mean())
-            accepted.append((part_indices, mean_pixel_x, part_voxel_count))
+            accepted.append((part_indices, mean_pixel_x, part_voxel_count, footprint))
     accepted.sort(key=lambda item: item[1])
 
     point_labels = np.full(len(points), -1, dtype=np.int32)
     objects: list[DetectedObject] = []
-    for label, (member_indices, _, part_voxel_count) in enumerate(accepted):
+    for label, (member_indices, _, part_voxel_count, footprint) in enumerate(accepted):
         point_labels[member_indices] = label
         member_points = points[member_indices]
         min_xyz = member_points.min(axis=0)
@@ -475,6 +568,7 @@ def segment_tabletop_objects(
                 contour_depth_pixels=bounding_contour(np.column_stack(
                     (pixel_x[member_indices], pixel_y[member_indices])
                 ), depth.shape, params.bottom_padding_pixels),
+                footprint_diameter=footprint,
             )
         )
 

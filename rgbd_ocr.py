@@ -28,13 +28,13 @@ class OCRResult:
 
 
 class RegionOCR:
-    def __init__(self, engine="rapidocr", model_directory=None, *, fast=True):
+    def __init__(self, engine="rapidocr", model_directory=None, *, fast=True, threads=4):
         self.engine = engine
         self.fast = fast and engine == "rapidocr"
         if engine == "rapidocr":
             from rapidocr_onnxruntime import RapidOCR
             options = dict(det_limit_type="max") if fast else {}
-            self.reader = RapidOCR(text_score=0.3, intra_op_num_threads=4, inter_op_num_threads=1,
+            self.reader = RapidOCR(text_score=0.3, intra_op_num_threads=threads, inter_op_num_threads=1,
                                    **options)
         elif engine == "easyocr":
             import easyocr

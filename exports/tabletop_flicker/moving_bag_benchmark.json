@@ -1,0 +1,433 @@
+{
+  "frames": 60,
+  "errors": {},
+  "states": {
+    "acquired": 5,
+    "tracked": 55
+  },
+  "median_core_ms": 62.65364994760603,
+  "camera_translation_span_m": 0.1801594703671701,
+  "camera_rotation_span_deg": 4.4982379645614206,
+  "rows": [
+    {
+      "frame": 137,
+      "error": "",
+      "objects": 5,
+      "status": "acquired",
+      "core_ms": 211.26140002161264
+    },
+    {
+      "frame": 138,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 59.24469989258796
+    },
+    {
+      "frame": 139,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 72.84729997627437
+    },
+    {
+      "frame": 140,
+      "error": "",
+      "objects": 5,
+      "status": "acquired",
+      "core_ms": 72.82409991603345
+    },
+    {
+      "frame": 141,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 62.497699982486665
+    },
+    {
+      "frame": 142,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 65.24959998205304
+    },
+    {
+      "frame": 143,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 65.29519998002797
+    },
+    {
+      "frame": 144,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 70.05350000690669
+    },
+    {
+      "frame": 145,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 63.176300027407706
+    },
+    {
+      "frame": 146,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 52.996400045230985
+    },
+    {
+      "frame": 147,
+      "error": "",
+      "objects": 5,
+      "status": "acquired",
+      "core_ms": 74.45309998001903
+    },
+    {
+      "frame": 148,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 64.70460002310574
+    },
+    {
+      "frame": 149,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 69.76620003115386
+    },
+    {
+      "frame": 150,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 69.39800002146512
+    },
+    {
+      "frame": 151,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 64.39379998482764
+    },
+    {
+      "frame": 152,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 56.611099978908896
+    },
+    {
+      "frame": 153,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 67.99450004473329
+    },
+    {
+      "frame": 154,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 66.57579995226115
+    },
+    {
+      "frame": 155,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 65.5100999865681
+    },
+    {
+      "frame": 156,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 63.59349994454533
+    },
+    {
+      "frame": 157,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 70.13550004921854
+    },
+    {
+      "frame": 158,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 64.38140000682324
+    },
+    {
+      "frame": 159,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 62.50729993917048
+    },
+    {
+      "frame": 160,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 65.00880001112819
+    },
+    {
+      "frame": 161,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 65.24040002841502
+    },
+    {
+      "frame": 162,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 67.86930002272129
+    },
+    {
+      "frame": 163,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 57.89369996637106
+    },
+    {
+      "frame": 164,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 60.80209999345243
+    },
+    {
+      "frame": 165,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 64.598000026308
+    },
+    {
+      "frame": 166,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 62.71919992286712
+    },
+    {
+      "frame": 167,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 54.62239996995777
+    },
+    {
+      "frame": 168,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 60.53050002083182
+    },
+    {
+      "frame": 169,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 61.71599996741861
+    },
+    {
+      "frame": 170,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 59.031100012362
+    },
+    {
+      "frame": 171,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 57.28629999794066
+    },
+    {
+      "frame": 172,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 59.70890005119145
+    },
+    {
+      "frame": 173,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 62.35640007071197
+    },
+    {
+      "frame": 174,
+      "error": "",
+      "objects": 5,
+      "status": "tracked",
+      "core_ms": 60.65559992566705
+    },
+    {
+      "frame": 175,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 76.0696999495849
+    },
+    {
+      "frame": 176,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 62.37049994524568
+    },
+    {
+      "frame": 177,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 55.81960000563413
+    },
+    {
+      "frame": 178,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 59.10730001050979
+    },
+    {
+      "frame": 179,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 71.8027000548318
+    },
+    {
+      "frame": 180,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 67.43479997385293
+    },
+    {
+      "frame": 181,
+      "error": "",
+      "objects": 0,
+      "status": "tracked",
+      "core_ms": 83.64389999769628
+    },
+    {
+      "frame": 182,
+      "error": "",
+      "objects": 4,
+      "status": "acquired",
+      "core_ms": 67.05420010257512
+    },
+    {
+      "frame": 183,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 56.067600031383336
+    },
+    {
+      "frame": 184,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 55.22189999464899
+    },
+    {
+      "frame": 185,
+      "error": "",
+      "objects": 4,
+      "status": "acquired",
+      "core_ms": 62.588099972344935
+    },
+    {
+      "frame": 186,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 55.76490005478263
+    },
+    {
+      "frame": 187,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 60.70320005528629
+    },
+    {
+      "frame": 188,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 62.053299974650145
+    },
+    {
+      "frame": 189,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 54.68409997411072
+    },
+    {
+      "frame": 190,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 55.33979996107519
+    },
+    {
+      "frame": 191,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 50.33040000125766
+    },
+    {
+      "frame": 192,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 60.81880000419915
+    },
+    {
+      "frame": 193,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 58.481100015342236
+    },
+    {
+      "frame": 194,
+      "error": "",
+      "objects": 0,
+      "status": "tracked",
+      "core_ms": 65.84980001207441
+    },
+    {
+      "frame": 195,
+      "error": "",
+      "objects": 2,
+      "status": "tracked",
+      "core_ms": 65.95830002333969
+    },
+    {
+      "frame": 196,
+      "error": "",
+      "objects": 4,
+      "status": "tracked",
+      "core_ms": 47.00229992158711
+    }
+  ]
+}

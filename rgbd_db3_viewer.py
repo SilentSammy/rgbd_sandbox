@@ -53,8 +53,8 @@ class Playback:
                 self.direction = 0
         return command
 
-    def poll(self):
-        return self.update(cv2.waitKey(20))
+    def poll(self, delay_ms=20):
+        return self.update(cv2.waitKey(delay_ms))
 
 
 def _resize(image, max_dimension):

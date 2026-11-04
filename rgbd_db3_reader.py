@@ -11,35 +11,13 @@ indexed; image payloads are loaded on demand. Unmatched depth frames are skipped
 """
 
 from bisect import bisect_left
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from rosbags.highlevel import AnyReader
 from rosbags.typesys import Stores, get_typestore
-
-
-@dataclass
-class Camera:
-    width: int
-    height: int
-    K: np.ndarray
-    D: np.ndarray
-    distortion_model: str
-
-
-@dataclass
-class Calibration:
-    color: Camera
-    depth: Camera
-    depth_to_color: np.ndarray
-
-
-@dataclass
-class Frame:
-    timestamp_ns: int
-    color: np.ndarray
-    depth: np.ndarray
+from rgbd_types import Camera, Calibration, Frame  # Re-export the existing reader API.
+from rgbd_types import rotate_camera_clockwise as _rotate_camera_clockwise
 
 
 class RealSenseReader:
@@ -198,24 +176,6 @@ def _image(message, *, color):
     pixels = rows[:, :message.width * channels]
     image = pixels.reshape(message.height, message.width, 3) if color else pixels
     return image[:, :, ::-1].copy() if encoding == "bgr8" else image.copy()
-
-
-def _rotate_camera_clockwise(camera):
-    """Calibration for a 90-degree clockwise image rotation (np.rot90(image, -1)).
-
-    Pixels: (u, v) -> (height - 1 - v, u).
-    Camera axes: (X, Y, Z) -> (-Y, X, Z).
-    """
-    K = camera.K
-    rotated_K = np.array([
-        [K[1, 1], 0, camera.height - 1 - K[1, 2]],
-        [0, K[0, 0], K[0, 2]],
-        [0, 0, 1],
-    ])
-    D = camera.D.copy()
-    if "brown conrady" in camera.distortion_model.lower() and len(D) >= 4:
-        D[2], D[3] = D[3], -D[2]
-    return Camera(camera.height, camera.width, rotated_K, D, camera.distortion_model)
 
 
 if __name__ == "__main__":

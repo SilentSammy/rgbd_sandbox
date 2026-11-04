@@ -5,7 +5,7 @@ import numpy as np
 
 from board_config import GridboardConfig
 from board_est import BoardEstimator
-from board_pose_tracking import BoardPoseTracker
+from board_pose_tracking import BoardPoseEstimator, BoardPoseTracker
 
 
 DEFAULT_DICTIONARY = "4x4"
@@ -33,6 +33,11 @@ def letter_board(dictionary=DEFAULT_DICTIONARY, board_scale=DEFAULT_BOARD_SCALE)
 
 _LETTER_BOARD = letter_board()
 BOARD = _LETTER_BOARD
+
+
+def make_pose_estimator(color_camera, board=None):
+    """RGB-only pose with marker tracking; apply a separate PoseFilter downstream."""
+    return BoardPoseEstimator(BOARD if board is None else board, color_camera.K, color_camera.D)
 
 
 def make_estimator(color_camera, board=None, *, tracking=True):

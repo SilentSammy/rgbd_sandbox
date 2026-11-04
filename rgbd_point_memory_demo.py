@@ -16,24 +16,10 @@ from board_pose_setup import DEFAULT_ROTATIONS, make_estimator
 from rgbd_db3_reader import RealSenseReader
 from rgbd_db3_viewer import Playback, PLAYBACK_HELP, _resize, _native_pixel, _display_pixel, _depth_pixel
 from rgbd_projection import Projector
-
-
-def remember_point(pixel, color_z, pose, camera):
-    """Original RGB pixel + measured RGB-camera Z -> public board coordinates."""
-    board_to_camera, pnp = pose
-    # The estimator rotates corners before PnP; its pixel mapping is self-inverse.
-    pixel = pnp.to_image_points([pixel]).astype(np.float64).reshape(1, 1, 2)
-    xy = cv2.undistortPoints(pixel, camera.K, camera.D).reshape(2)
-    camera_point = np.array([xy[0] * color_z, xy[1] * color_z, color_z, 1])
-    return (np.linalg.inv(board_to_camera) @ camera_point)[:3]
-
-
-def predict_points(points, pose, camera):
-    """Board points -> original RGB pixels and RGB-camera Z, without new depth."""
-    board_to_camera, pnp = pose
-    camera_points = np.asarray(points) @ board_to_camera[:3, :3].T + board_to_camera[:3, 3]
-    pixels, _ = cv2.projectPoints(camera_points, np.zeros(3), np.zeros(3), camera.K, camera.D)
-    return pnp.to_image_points(pixels), camera_points[:, 2]
+from rgbd_geometry import (
+    image_point_to_reference as remember_point,
+    reference_points_to_image as predict_points,
+)
 
 
 def view(source, *, max_dimension=None, jump=10, initial_frame=0):

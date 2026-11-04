@@ -21,6 +21,9 @@ class PoseWindow:
     def __init__(self, size=3):
         self.poses = deque(maxlen=size)
 
+    def reset(self):
+        self.poses.clear()
+
     def update(self, board_to_camera):
         self.poses.append(np.linalg.inv(board_to_camera))
         poses = np.array(self.poses)
@@ -28,6 +31,23 @@ class PoseWindow:
         camera_to_board[:3, :3] = Rotation.from_matrix(poses[:, :3, :3]).mean().as_matrix()
         camera_to_board[:3, 3] = poses[:, :3, 3].mean(axis=0)
         return np.linalg.inv(camera_to_board)
+
+
+class PoseFilter(PoseWindow):
+    """Filter a (reference-to-camera matrix, PnP result) or None independently."""
+
+    def update(self, pose):
+        if pose is None:
+            self.reset()
+            return None
+        transform, raw_pnp = pose
+        transform = super().update(transform)
+        pnp = copy.copy(raw_pnp)
+        # Keep annotations consistent with the existing public board-axis fix.
+        axes = np.diag([1, -1, -1]) if pnp.image_size else np.eye(3)
+        pnp.rvec = cv2.Rodrigues(transform[:3, :3] @ axes)[0].ravel()
+        pnp.tvec = transform[:3, 3].copy()
+        return transform, pnp
 
 
 def _patch(gray, corners):
@@ -154,19 +174,22 @@ class TrackedBoard:
         return corners, ids
 
 
-class BoardPoseTracker:
-    """Drop-in RGB estimator; preserve board axes and synchronize filtered PnP."""
+class BoardPoseEstimator:
+    """RGB pose with per-marker tracking, without temporal pose filtering."""
 
-    def __init__(self, config, K, D, *, window=3, max_tracked_frames=3):
+    def __init__(self, config, K, D, *, max_tracked_frames=3):
         self.estimator = BoardEstimator(TrackedBoard(config, max_tracked_frames), K, D)
-        self.filter = PoseWindow(window)
         self.reset()
 
     def __getattr__(self, name):
         return getattr(self.estimator, name)
 
+    def estimate(self, color_rgb, *, frame_index=None):
+        """RGB uint8 -> unfiltered (reference-to-camera matrix, PnP result), or None."""
+        return self.get_board_transform(cv2.cvtColor(color_rgb, cv2.COLOR_RGB2BGR),
+                                        frame_index=frame_index)
+
     def reset(self):
-        self.filter.poses.clear()
         self.estimator.config.reset()
         self.last_index = None
         self.direction = 0
@@ -184,20 +207,30 @@ class BoardPoseTracker:
             self.last_index = frame_index
         self.raw_pose = self.estimator.get_board_transform(frame)
         if self.raw_pose is None:
-            self.filter.poses.clear()
             self.status = "NO BOARD POSE"
             return None
-        transform, raw_pnp = self.raw_pose
-        transform = self.filter.update(transform)
-        pnp = copy.copy(raw_pnp)
-        # Public board axes include the existing X half-turn. PnP uses its
-        # pre-convention rotation; annotations and downstream pose must agree.
-        rotation = transform[:3, :3] @ np.diag([1, -1, -1])
-        pnp.rvec = cv2.Rodrigues(rotation)[0].ravel()
-        pnp.tvec = transform[:3, 3].copy()
         config = self.estimator.config
-        self.status = (f"RGB pose: {len(config.detected_ids)} detected, {len(config.tracked_ids)} tracked"
-                       f" | filter {len(self.filter.poses)}/{self.filter.poses.maxlen}")
+        self.status = f"RGB pose: {len(config.detected_ids)} detected, {len(config.tracked_ids)} tracked"
         if drawing_frame is not None:
-            pnp.draw_axes(drawing_frame, self.K, self.D)
-        return transform, pnp
+            self.raw_pose[1].draw_axes(drawing_frame, self.K, self.D)
+        return self.raw_pose
+
+
+class BoardPoseTracker(BoardPoseEstimator):
+    """Compatibility estimator composing RGB pose estimation and PoseFilter."""
+
+    def __init__(self, config, K, D, *, window=3, max_tracked_frames=3):
+        self.filter = PoseFilter(window)
+        super().__init__(config, K, D, max_tracked_frames=max_tracked_frames)
+
+    def reset(self):
+        super().reset()
+        self.filter.reset()
+
+    def get_board_transform(self, frame, drawing_frame=None, *, frame_index=None):
+        pose = self.filter.update(super().get_board_transform(frame, frame_index=frame_index))
+        if pose is not None:
+            self.status += f" | filter {len(self.filter.poses)}/{self.filter.poses.maxlen}"
+            if drawing_frame is not None:
+                pose[1].draw_axes(drawing_frame, self.K, self.D)
+        return pose
