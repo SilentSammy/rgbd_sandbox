@@ -7,11 +7,10 @@ from time import perf_counter
 
 import cv2
 
-from rgbd_db3_reader import RealSenseReader
 
 
 PLAYBACK_HELP = "A reverse | S pause | D play | Q previous | E next | W restart | Esc quit"
-DEFAULT_BAG = Path(__file__).resolve().parent.parent / "rgbd_sandbox_legacy/recordings/20261005_195417.db3"
+DEFAULT_BAG = Path(__file__).resolve().parents[3] / "rgbd_sandbox_legacy/recordings/20261005_195417.db3"
 
 
 class Playback:

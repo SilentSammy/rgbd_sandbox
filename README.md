@@ -3,6 +3,26 @@
 Source-independent detection with separate pose providers and background OCR.
 The previous code remains in `../rgbd_sandbox_legacy`.
 
+
+`pipeline.py` is the only Python entry point at the project root. It runs the
+combined demo by default; `--no-ocr` selects detection. It also exports
+`DetectionPipeline` and `ObjectClassifier` for source-independent application use.
+
+```text
+pipeline.py
+rgbd/
+  types.py, geometry.py
+  sources/          # Input adapters
+  pose/             # Board estimation and filtering
+  detection/        # Segmentation, appearance, persistence and orchestration
+  classification/   # OCR, dictionary, label memory and worker
+  demos/            # DB3 playback and component demos
+tests/
+```
+
+Component demos remain available through `python -m rgbd.<package>.<module>`;
+there are no compatibility wrapper scripts scattered across the project root.
+
 ## Setup and demos
 
 ```powershell
@@ -10,8 +30,8 @@ python -m pip install -r requirements.txt
 # Optional classification dependencies:
 python -m pip install -r requirements-ocr.txt
 
-.venv\Scripts\python.exe detection_pipeline.py --start-frame 137
-.venv\Scripts\python.exe classification.py --start-frame 137
+.venv\Scripts\python.exe pipeline.py --no-ocr --start-frame 137
+.venv\Scripts\python.exe pipeline.py --start-frame 137
 ```
 
 Every demo defaults to
@@ -19,7 +39,7 @@ Every demo defaults to
 positional argument selects another bag. `--rotations 1` rotates images and
 calibration clockwise together. `--max-dimension` defaults to 600.
 
-Playback is centralized in `rgbd_demo.py`: A reverse, S pause, D play, Q/E
+Playback is centralized in `rgbd/demos/common.py`: A reverse, S pause, D play, Q/E
 previous/next, W restart at `--start-frame`, Escape quit. Demos start paused.
 There is no settings GUI. Background OCR refreshes a paused display without
 reprocessing detection or advancing lifecycle timers.
@@ -28,24 +48,24 @@ reprocessing detection or advancing lifecycle timers.
 
 | Module / class | Responsibility |
 | --- | --- |
-| `rgbd_db3_reader.RealSenseReader` | RealSense Viewer DB3 -> synchronized frames and calibration, without ROS |
-| `board_pose_estimator.BoardPoseEstimator` | RGB frame + known board -> raw shared pose, marker diagnostics |
-| `pose_filter.PoseFilter` | Pose -> short-window position/rotation mean |
-| `tabletop_segmenter.TabletopSegmenter` | Depth + optional pose -> masks, boxes and geometry; remembers only the support plane |
-| `appearance.RGBObjectAppearance` | Frame + detections -> masked ORB/color signatures and RGB crop boxes; no galleries |
-| `object_persistor.ObjectPersistor` | Geometry + pose + appearance + capture dt -> persistent ID snapshots and association events |
-| `detection_pipeline.DetectionPipeline` | Compose segmentation, appearance and persistence; expose status and stage timings |
-| `ocr_reader.OCRReader` | Synchronous RGB crops -> text, confidence, direction hypotheses and source-image polygons |
-| `product_matcher.ProductMatcher` | Text -> dictionary evidence or ambiguity; no temporal memory |
-| `classification_memory.ClassificationMemory` | Retain strongest accepted product evidence per persistent ID |
-| `classification.ObjectClassifier` | One bounded OCR worker, capture-time scheduling and checked delayed-result association |
+| `rgbd.sources.db3.RealSenseReader` | RealSense Viewer DB3 -> synchronized frames and calibration, without ROS |
+| `rgbd.pose.board.BoardPoseEstimator` | RGB frame + known board -> raw shared pose, marker diagnostics |
+| `rgbd.pose.filter.PoseFilter` | Pose -> short-window position/rotation mean |
+| `rgbd.detection.tabletop.TabletopSegmenter` | Depth + optional pose -> masks, boxes and geometry; remembers only the support plane |
+| `rgbd.detection.appearance.RGBObjectAppearance` | Frame + detections -> masked ORB/color signatures and RGB crop boxes; no galleries |
+| `rgbd.detection.persistence.ObjectPersistor` | Geometry + pose + appearance + capture dt -> persistent ID snapshots and association events |
+| `rgbd.detection.pipeline.DetectionPipeline` | Compose segmentation, appearance and persistence; expose status and stage timings |
+| `rgbd.classification.ocr.OCRReader` | Synchronous RGB crops -> text, confidence, direction hypotheses and source-image polygons |
+| `rgbd.classification.matcher.ProductMatcher` | Text -> dictionary evidence or ambiguity; no temporal memory |
+| `rgbd.classification.memory.ClassificationMemory` | Retain strongest accepted product evidence per persistent ID |
+| `rgbd.classification.worker.ObjectClassifier` | One bounded OCR worker, capture-time scheduling and checked delayed-result association |
 
 Acquisition, pose estimation/filtering, OCR and GUI stay outside detection:
 
 ```python
-from board_pose_estimator import BoardPoseEstimator
-from pose_filter import PoseFilter
-from detection_pipeline import DetectionPipeline
+from rgbd.pose.board import BoardPoseEstimator
+from rgbd.pose.filter import PoseFilter
+from pipeline import DetectionPipeline
 
 estimator = BoardPoseEstimator(calibration.color)
 smoother = PoseFilter()
@@ -62,7 +82,7 @@ layout, not arbitrary ROS topic names.
 
 ## Shared contracts
 
-`rgbd_types.py` has only NumPy and standard-library dependencies:
+`rgbd/types.py` has only NumPy and standard-library dependencies:
 
 - `Frame`: RGB uint8 HxWx3, floating-point depth in meters, integer capture time
   in nanoseconds. Zero/NaN depth is invalid. Depth is optical Z, not radial range.
@@ -118,7 +138,7 @@ not Euler angles or arbitrary matrix entries. Missing pose, reference changes,
 capture gaps over 0.5 s, repeated timestamps and direction changes reset history.
 Window 3 adds roughly one frame of lag; it does not reject pose outliers.
 
-Segmentation retains the tested stateless core in `_tabletop_geometry.py`:
+Segmentation retains the tested stateless core in `rgbd/detection/_geometry.py`:
 sparse RANSAC, voxelized DBSCAN, conservative cluster splitting and metric/ROI
 filters. Half-resolution processing uses exact measured rays and restores native
 masks/boxes; it needs even image dimensions and rectified zero-distortion depth.
@@ -148,7 +168,7 @@ positions and share immutable signature arrays.
 
 ## Classification behavior
 
-`product_setup.py` holds canonical products and legitimate aliases, including
+`rgbd/classification/products.py` holds canonical products and legitimate aliases, including
 Supramycina. OCR errors are handled with fuzzy matching rather than mistake aliases.
 The reader tests both perpendicular text axes and both reading directions;
 perspective-rectified lines handle tilt. RapidOCR 1.x is pinned because the fast
@@ -182,16 +202,16 @@ worker after playback, with `--wait-seconds` (default 60) as the timeout.
 ## Component demos and saved evidence
 
 Each public component has a main-guard DB3 demo. Later stages reuse the frontend
-in `detection_demo.py`:
+in `rgbd/demos/detection.py`:
 
 ```powershell
-.venv\Scripts\python.exe appearance.py --start-frame 137 --object 0 --reference-object 0
-.venv\Scripts\python.exe object_persistor.py --start-frame 137
-.venv\Scripts\python.exe detection_pipeline.py --start-frame 137 --features 120
-.venv\Scripts\python.exe ocr_reader.py --start-frame 137
-.venv\Scripts\python.exe product_matcher.py --start-frame 137
-.venv\Scripts\python.exe classification_memory.py --start-frame 137
-.venv\Scripts\python.exe classification.py --start-frame 137 --probation 1
+.venv\Scripts\python.exe -m rgbd.detection.appearance --start-frame 137 --object 0 --reference-object 0
+.venv\Scripts\python.exe -m rgbd.detection.persistence --start-frame 137
+.venv\Scripts\python.exe -m rgbd.detection.pipeline --start-frame 137 --features 120
+.venv\Scripts\python.exe -m rgbd.classification.ocr --start-frame 137
+.venv\Scripts\python.exe -m rgbd.classification.matcher --start-frame 137
+.venv\Scripts\python.exe -m rgbd.classification.memory --start-frame 137
+.venv\Scripts\python.exe -m rgbd.classification.worker --start-frame 137 --probation 1
 ```
 
 Appearance comparison uses the first processed frame as a demo reference; the
@@ -201,8 +221,8 @@ on current frames; old OCR polygons are never painted on newer frames.
 
 ```powershell
 $env:OMP_NUM_THREADS='4'
-.venv\Scripts\python.exe classification.py --headless --start-frame 137 --frames 60 --probation 1 --output outputs/complete_pipeline
-.venv\Scripts\python.exe -m unittest discover -v
+.venv\Scripts\python.exe -m rgbd.classification.worker --headless --start-frame 137 --frames 60 --probation 1 --output outputs/complete_pipeline
+.venv\Scripts\python.exe -m unittest discover -s tests -t . -v
 ```
 
 `--output` saves `measurements.json` and `last_frame.png`. Segmentation also saves
@@ -217,3 +237,22 @@ detection alone measured 109 ms median / 135 ms p95, excluding pose estimation,
 bag reads and rendering. `--features 120` retained the same five IDs at 99 ms
 median / 114 ms p95. Full demo processing is slower; a complete 10 FPS live
 system is not established by these measurements.
+
+An additional isolated comparison ran both implementations on this laptop with
+the same recording (frames 137-196), 180 features, four OpenMP threads, one
+OpenCV thread, and the first five frames excluded as warmup. Unlike the component
+numbers above, these include board pose estimation and filtering. They exclude
+bag decoding, drawing, and OCR:
+
+| Implementation | Median | p95 |
+| --- | ---: | ---: |
+| Legacy stack | 230.1 ms | 246.3 ms |
+| Rebuilt stack | 91.9 ms | 114.0 ms |
+
+The rebuilt stack is faster in this local comparison; the earlier approximately
+81 ms robot-loop measurement used different hardware/settings. These are timing
+comparisons of the stacks as implemented, not identical algorithms. Runtime load
+and rendering affect full-demo FPS; the isolated processing median alone does
+not guarantee 10 FPS end to end. Raw records and settings are in
+`outputs/performance_comparison.json`, `outputs/legacy_local_timing.json`, and
+`outputs/packaged_local_timing.json`.

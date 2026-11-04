@@ -6,10 +6,10 @@ from time import perf_counter
 
 import numpy as np
 
-from classification_memory import ClassificationMemory
-from ocr_reader import OCRReader
-from product_matcher import ProductMatcher
-from rgbd_geometry import padded_box
+from rgbd.classification.memory import ClassificationMemory
+from rgbd.classification.ocr import OCRReader
+from rgbd.classification.matcher import ProductMatcher
+from rgbd.geometry import padded_box
 
 
 @dataclass
@@ -127,5 +127,5 @@ class ObjectClassifier:
 
 
 if __name__ == '__main__':
-    from detection_demo import main
+    from rgbd.demos.detection import main
     main('classification')

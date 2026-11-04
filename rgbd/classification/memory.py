@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from product_matcher import LabelMatch, Observation
+from rgbd.classification.matcher import LabelMatch, Observation
 
 
 @dataclass(frozen=True)
@@ -47,5 +47,5 @@ class ClassificationMemory:
 
 
 if __name__ == '__main__':
-    from detection_demo import main
+    from rgbd.demos.detection import main
     main('classification')

@@ -4,10 +4,10 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from appearance import compare, Parameters as AppearanceParameters
-from _object_memory import ObjectMemory
-from rgbd_types import Track
-from rgbd_geometry import reference_positions
+from rgbd.detection.appearance import compare, Parameters as AppearanceParameters
+from rgbd.detection._memory import ObjectMemory
+from rgbd.types import Track
+from rgbd.geometry import reference_positions
 
 
 @dataclass
@@ -246,5 +246,5 @@ class ObjectPersistor:
 
 
 if __name__ == '__main__':
-    from detection_demo import main
+    from rgbd.demos.detection import main
     main('memory')

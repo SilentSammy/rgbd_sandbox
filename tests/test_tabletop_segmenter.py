@@ -5,8 +5,8 @@ import unittest
 import cv2
 import numpy as np
 
-from rgbd_types import Calibration, Camera, Pose
-from tabletop_segmenter import Parameters, TabletopSegmenter
+from rgbd.types import Calibration, Camera, Pose
+from rgbd.detection.tabletop import Parameters, TabletopSegmenter
 
 
 class SegmentationTests(unittest.TestCase):

@@ -2,10 +2,10 @@ import unittest
 
 import numpy as np
 
-from appearance import Observation
-from object_persistor import ObjectPersistor, Parameters, _AppearanceMemory
-from rgbd_types import Calibration, Camera, Detection, Pose
-from test_appearance import signature
+from rgbd.detection.appearance import Observation
+from rgbd.detection.persistence import ObjectPersistor, Parameters, _AppearanceMemory
+from rgbd.types import Calibration, Camera, Detection, Pose
+from tests.test_appearance import signature
 
 
 class MemoryTests(unittest.TestCase):

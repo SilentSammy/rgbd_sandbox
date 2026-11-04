@@ -3,9 +3,9 @@ import unittest
 import cv2
 import numpy as np
 
-from appearance import RGBObjectAppearance, compare, describe
-from rgbd_geometry import rgb_ownership
-from rgbd_types import Calibration, Camera, Detection, Frame
+from rgbd.detection.appearance import RGBObjectAppearance, compare, describe
+from rgbd.geometry import rgb_ownership
+from rgbd.types import Calibration, Camera, Detection, Frame
 
 
 def signature(seed, color=(240, 240, 240)):

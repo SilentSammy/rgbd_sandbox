@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from rgbd_geometry import rgb_ownership
+from rgbd.geometry import rgb_ownership
 
 
 @dataclass
@@ -173,5 +173,5 @@ class RGBObjectAppearance:
 
 
 if __name__ == '__main__':
-    from detection_demo import main
+    from rgbd.demos.detection import main
     main('appearance')

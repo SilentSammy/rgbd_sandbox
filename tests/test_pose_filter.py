@@ -2,8 +2,8 @@ import unittest
 
 import numpy as np
 
-from pose_filter import Parameters, PoseFilter
-from rgbd_types import Pose
+from rgbd.pose.filter import Parameters, PoseFilter
+from rgbd.types import Pose
 
 
 def pose(x, timestamp_ns, angle=0., reference="board"):

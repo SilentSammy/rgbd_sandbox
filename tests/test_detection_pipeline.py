@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from detection_pipeline import DetectionPipeline
-from rgbd_types import Calibration, Camera, Detection, Frame, Pose
+from rgbd.detection.pipeline import DetectionPipeline
+from rgbd.types import Calibration, Camera, Detection, Frame, Pose
 
 
 class PipelineTests(unittest.TestCase):

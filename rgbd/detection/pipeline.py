@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from numbers import Integral
 from time import perf_counter
 
-from appearance import RGBObjectAppearance, Observation
-from object_persistor import ObjectPersistor
-from tabletop_segmenter import TabletopSegmenter, Segmentation
-from rgbd_types import Frame, Pose, Track
+from rgbd.detection.appearance import RGBObjectAppearance, Observation
+from rgbd.detection.persistence import ObjectPersistor
+from rgbd.detection.tabletop import TabletopSegmenter, Segmentation
+from rgbd.types import Frame, Pose, Track
 
 
 @dataclass
@@ -77,5 +77,5 @@ class DetectionPipeline:
 
 
 if __name__ == '__main__':
-    from detection_demo import main
+    from rgbd.demos.detection import main
     main('detection')

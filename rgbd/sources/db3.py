@@ -16,8 +16,8 @@ from pathlib import Path
 import numpy as np
 from rosbags.highlevel import AnyReader
 from rosbags.typesys import Stores, get_typestore
-from rgbd_types import Camera, Calibration, Frame  # Re-export the existing reader API.
-from rgbd_types import rotate_camera_clockwise as _rotate_camera_clockwise
+from rgbd.types import Camera, Calibration, Frame  # Re-export the existing reader API.
+from rgbd.types import rotate_camera_clockwise as _rotate_camera_clockwise
 
 
 class RealSenseReader:
@@ -182,18 +182,5 @@ def _image(message, *, color):
 
 
 if __name__ == "__main__":
-    import cv2
-    from rgbd_demo import demo_parser, resize, run_demo
-
-    args = demo_parser(__doc__).parse_args()
-    with RealSenseReader(args.bag, rotations=args.rotations) as source:
-        def show(frame, index):
-            valid = np.isfinite(frame.depth) & (frame.depth > 0)
-            values = np.where(valid, frame.depth, 0)
-            depth = cv2.applyColorMap(np.uint8(np.clip((values-.25)/1.75, 0, 1)*255), cv2.COLORMAP_TURBO)
-            depth[~valid] = 0
-            color = resize(cv2.cvtColor(frame.color, cv2.COLOR_RGB2BGR), args.max_dimension)
-            depth = cv2.resize(depth, (round(depth.shape[1]*color.shape[0]/depth.shape[0]), color.shape[0]))
-            return np.hstack((color, depth)), dict(valid_depth_pixels=int(valid.sum()))
-
-        run_demo(source, show, args, title="RGB | depth (0.25-2 m)")
+    from rgbd.demos.viewer import main
+    main()

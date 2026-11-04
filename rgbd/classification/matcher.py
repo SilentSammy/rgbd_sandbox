@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import unicodedata
 import re
 
-from product_setup import LABELS
+from rgbd.classification.products import LABELS
 
 
 @dataclass
@@ -90,5 +90,5 @@ class ProductMatcher:
 
 
 if __name__ == '__main__':
-    from detection_demo import main
+    from rgbd.demos.detection import main
     main('products')

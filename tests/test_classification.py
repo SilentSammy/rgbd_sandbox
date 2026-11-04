@@ -3,9 +3,9 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from classification_memory import ClassificationMemory
-from ocr_reader import OCRReader, Parameters, Reading, original_pixels
-from product_matcher import ProductMatcher
+from rgbd.classification.memory import ClassificationMemory
+from rgbd.classification.ocr import OCRReader, Parameters, Reading, original_pixels
+from rgbd.classification.matcher import ProductMatcher
 
 
 def reading(text, confidence=.95):

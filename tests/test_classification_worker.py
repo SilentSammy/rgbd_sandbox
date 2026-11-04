@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from appearance import Observation
-from classification import ObjectClassifier
-from ocr_reader import Reading
-from rgbd_types import Frame
+from rgbd.detection.appearance import Observation
+from rgbd.classification.worker import ObjectClassifier
+from rgbd.classification.ocr import Reading
+from rgbd.types import Frame
 
 
 class WorkerTests(unittest.TestCase):
@@ -86,7 +86,7 @@ class WorkerTests(unittest.TestCase):
             self.assertFalse(classifier.submit(self.frame, [self.track], self.observations, 0))
 
     def test_paused_demo_refresh_does_not_reprocess_capture(self):
-        from rgbd_demo import run_demo
+        from rgbd.demos.common import run_demo
         frame = self.frame
         class Source:
             fps = 30
@@ -96,8 +96,8 @@ class WorkerTests(unittest.TestCase):
         image = np.zeros((40, 60, 3), np.uint8)
         process = Mock(return_value=(image, dict(ocr_state='loading')))
         refresh = Mock(return_value=(image, dict(ocr_state='idle')))
-        with patch('rgbd_demo.cv2.imshow'), patch('rgbd_demo.cv2.waitKey', side_effect=[-1, 27]), \
-                patch('rgbd_demo.cv2.getWindowProperty', return_value=1), patch('rgbd_demo.cv2.destroyAllWindows'):
+        with patch('rgbd.demos.common.cv2.imshow'), patch('rgbd.demos.common.cv2.waitKey', side_effect=[-1, 27]), \
+                patch('rgbd.demos.common.cv2.getWindowProperty', return_value=1), patch('rgbd.demos.common.cv2.destroyAllWindows'):
             rows = run_demo(Source(), process, args, title='test', refresh=refresh)
         self.assertEqual(process.call_count, 1)
         self.assertEqual(refresh.call_count, 1)

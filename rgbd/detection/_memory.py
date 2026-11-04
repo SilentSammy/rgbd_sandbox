@@ -2,7 +2,7 @@
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from rgbd_types import Track
+from rgbd.types import Track
 
 
 class ObjectMemory:

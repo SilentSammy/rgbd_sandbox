@@ -90,5 +90,5 @@ class OCRReader:
 
 
 if __name__ == '__main__':
-    from detection_demo import main
+    from rgbd.demos.detection import main
     main('ocr')

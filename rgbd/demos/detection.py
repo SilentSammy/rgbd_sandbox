@@ -9,12 +9,12 @@ from time import sleep
 import cv2
 import numpy as np
 
-from appearance import RGBObjectAppearance, compare
-from board_pose_estimator import BoardPoseEstimator
-from pose_filter import PoseFilter
-from rgbd_db3_reader import RealSenseReader
-from rgbd_demo import demo_parser, run_demo
-from tabletop_segmenter import TabletopSegmenter
+from rgbd.detection.appearance import RGBObjectAppearance, compare
+from rgbd.pose.board import BoardPoseEstimator
+from rgbd.pose.filter import PoseFilter
+from rgbd.sources.db3 import RealSenseReader
+from rgbd.demos.common import demo_parser, run_demo
+from rgbd.detection.tabletop import TabletopSegmenter
 
 
 def draw(frame, observations, *, tracks=(), labels=None, features=False, selected=None):
@@ -44,12 +44,18 @@ def draw(frame, observations, *, tracks=(), labels=None, features=False, selecte
 
 def main(stage='appearance'):
     parser = demo_parser(__doc__)
+    if stage == 'full':
+        parser.add_argument('--no-ocr', action='store_true', help='run detection without classification')
     parser.add_argument('--object', type=int, help='highlight features/compare this current detection index')
     parser.add_argument('--reference-object', type=int, help='compare against this detection on the initial frame')
     parser.add_argument('--features', type=int, default=180)
-    parser.add_argument('--probation', type=float, default=0. if stage == 'classification' else 1., help='capture seconds before confirming a track')
+    parser.add_argument('--probation', type=float, help='capture seconds before confirming a track')
     parser.add_argument('--wait-seconds', type=float, default=60., help='headless OCR drain timeout')
     args = parser.parse_args()
+    if stage == 'full':
+        stage = 'detection' if args.no_ocr else 'classification'
+    if args.probation is None:
+        args.probation = 0. if stage == 'classification' else 1.
     cv2.setNumThreads(1)
     with ExitStack() as stack:
         source = stack.enter_context(RealSenseReader(args.bag, rotations=args.rotations))
@@ -58,11 +64,11 @@ def main(stage='appearance'):
         extractor.parameters.features = args.features
         persistor = None
         if stage == 'memory':
-            from object_persistor import ObjectPersistor, Parameters
+            from rgbd.detection.persistence import ObjectPersistor, Parameters
             persistor = ObjectPersistor(source.calibration, Parameters(probation_period=args.probation))
         pipeline = None
         if stage in ('detection', 'classification'):
-            from detection_pipeline import DetectionPipeline
+            from rgbd.detection.pipeline import DetectionPipeline
             pipeline = DetectionPipeline(source.calibration, segmenter=segmenter, extractor=extractor, allow_reverse=True)
             pipeline.persistor.parameters.probation_period = args.probation
         previous_index, reference = None, None
@@ -70,14 +76,14 @@ def main(stage='appearance'):
         classifier = None
         last_frame = last_result = last_event = None
         if stage == 'classification':
-            from classification import ObjectClassifier
+            from rgbd.classification.worker import ObjectClassifier
             classifier = stack.enter_context(ObjectClassifier())
         reader = matcher = None
         if stage in ('ocr', 'products'):
-            from ocr_reader import OCRReader
+            from rgbd.classification.ocr import OCRReader
             reader = OCRReader()
             if stage == 'products':
-                from product_matcher import ProductMatcher
+                from rgbd.classification.matcher import ProductMatcher
                 matcher = ProductMatcher()
 
         def classification_step():
@@ -117,7 +123,9 @@ def main(stage='appearance'):
                 segmenter.reset()
                 smoother.reset()
             previous_index = index
+            pose_started = perf_counter()
             pose = smoother.update(estimator.estimate(frame))
+            pose_ms = (perf_counter()-pose_started)*1000
             dt = 0 if previous_time is None else abs(frame.timestamp_ns-previous_time)/1e9
             previous_time = frame.timestamp_ns
             timings = {}
@@ -144,7 +152,7 @@ def main(stage='appearance'):
                         comparisons.append(dict(current=i, reference=j, **asdict(compare(initial.signature, current.signature))))
             readings, products = (), []
             if reader is not None:
-                from rgbd_geometry import padded_box
+                from rgbd.geometry import padded_box
                 regions = [(i, padded_box(o.box, frame.color.shape)) for i, o in enumerate(observations)
                            if o.box is not None and args.object in (None, i)]
                 readings = tuple(replace(r, region=regions[r.region][0]) for r in
@@ -163,7 +171,7 @@ def main(stage='appearance'):
                 cv2.putText(image, text, (observation.box[0], observation.box[3]+18),
                             cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 255, 255), 1)
             info = dict(
-                status=segmentation.plane_status, objects=len(observations), appearance_ms=appearance_ms,
+                status=segmentation.plane_status, objects=len(observations), appearance_ms=appearance_ms, pose_ms=pose_ms,
                 features=[0 if o.signature is None else len(o.signature.points) for o in observations],
                 comparisons=comparisons,
                 tracks=[dict(id=t.id, index=t.detection_index, confirmed=t.confirmed, missing=t.missing_seconds,

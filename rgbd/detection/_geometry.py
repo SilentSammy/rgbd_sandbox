@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 import open3d as o3d
 
-from rgbd_types import Camera
+from rgbd.types import Camera
 
 
 @dataclass

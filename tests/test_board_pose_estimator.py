@@ -6,9 +6,9 @@ from unittest.mock import Mock
 import cv2
 import numpy as np
 
-from board_pose_estimator import BoardPoseEstimator
-from rgbd_demo import Playback
-from rgbd_types import Camera, Frame, rotate_camera_clockwise
+from rgbd.pose.board import BoardPoseEstimator
+from rgbd.demos.common import Playback
+from rgbd.types import Camera, Frame, rotate_camera_clockwise
 
 
 class PoseTests(unittest.TestCase):
