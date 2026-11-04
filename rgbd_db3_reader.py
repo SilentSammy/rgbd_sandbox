@@ -88,6 +88,9 @@ class RealSenseReader:
     def __len__(self):
         return len(self._pairs)
 
+    def __iter__(self):
+        return (self[index] for index in range(len(self)))
+
     def __getitem__(self, index):
         color_time, depth_time = self._pairs[index]
         color = _image(self._message(self._color, color_time), color=True)
@@ -179,18 +182,18 @@ def _image(message, *, color):
 
 
 if __name__ == "__main__":
-    import argparse
+    import cv2
+    from rgbd_demo import demo_parser, resize, run_demo
 
-    parser = argparse.ArgumentParser(description="Check a RealSense Viewer .db3 recording.")
-    parser.add_argument("bag", type=Path, help="path to an uncompressed .db3 file")
-    args = parser.parse_args()
-    if args.bag.suffix.lower() != ".db3" or not args.bag.is_file():
-        parser.error("Expected an existing .db3 file")
-    try:
-        with RealSenseReader(args.bag) as recording:
-            frame = recording[0]  # Check image encoding and dimensions too.
-            print(f"Valid RealSense recording: {len(recording)} paired frames")
-            print(f"RGB: {frame.color.shape}; depth: {frame.depth.shape} (meters)")
-            print("Calibration and first RGB-D pair validated; remaining images not decoded.")
-    except Exception as error:
-        parser.exit(1, f"Validation failed: {error}\n")
+    args = demo_parser(__doc__).parse_args()
+    with RealSenseReader(args.bag, rotations=args.rotations) as source:
+        def show(frame, index):
+            valid = np.isfinite(frame.depth) & (frame.depth > 0)
+            values = np.where(valid, frame.depth, 0)
+            depth = cv2.applyColorMap(np.uint8(np.clip((values-.25)/1.75, 0, 1)*255), cv2.COLORMAP_TURBO)
+            depth[~valid] = 0
+            color = resize(cv2.cvtColor(frame.color, cv2.COLOR_RGB2BGR), args.max_dimension)
+            depth = cv2.resize(depth, (round(depth.shape[1]*color.shape[0]/depth.shape[0]), color.shape[0]))
+            return np.hstack((color, depth)), dict(valid_depth_pixels=int(valid.sum()))
+
+        run_demo(source, show, args, title="RGB | depth (0.25-2 m)")

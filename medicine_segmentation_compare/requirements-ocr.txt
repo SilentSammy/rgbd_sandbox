@@ -1,2 +1,0 @@
-# Add to the experiment environment; preserve its GUI OpenCV installation.
-rapidocr_onnxruntime==1.4.4

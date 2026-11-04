@@ -4,3 +4,5 @@ recordings/
 *.pyc
 *.pyo
 *.pyd
+__pycache__/
+outputs/

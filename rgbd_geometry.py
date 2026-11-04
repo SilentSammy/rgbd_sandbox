@@ -1,61 +1,59 @@
-"""Reference/image conversions preserving the board estimator's pixel convention.
-
-A pose is (reference_to_camera, pnp). Its matrix uses the existing board/PnP
-axes; original RGB pixels must go through pnp.to_image_points(), not a bare
-inverse transform. All metric positions are in meters.
-"""
+"""Geometry in the shared optical conventions; no board-specific conversions."""
 
 import cv2
 import numpy as np
 
 
-def image_point_to_reference(pixel, color_z, pose, camera):
-    transform, pnp = pose
-    pixel = pnp.to_image_points([pixel]).astype(np.float64).reshape(1, 1, 2)
-    xy = cv2.undistortPoints(pixel, camera.K, camera.D).reshape(2)
-    point = np.array([xy[0]*color_z, xy[1]*color_z, color_z, 1])
-    return (np.linalg.inv(transform) @ point)[:3]
+def padded_box(box, shape, fraction=.1):
+    """Exclusive RGB box with modest context, clipped to the source image."""
+    x0, y0, x1, y1 = box
+    px, py = max(4, round((x1-x0)*fraction)), max(4, round((y1-y0)*fraction))
+    return max(0, x0-px), max(0, y0-py), min(shape[1], x1+px), min(shape[0], y1+py)
 
 
-def reference_points_to_image(points, pose, camera):
-    transform, pnp = pose
-    points = np.asarray(points).reshape(-1, 3)
-    if not len(points):
-        return np.empty((0, 2)), np.empty(0)
-    camera_points = points @ transform[:3, :3].T + transform[:3, 3]
-    pixels, _ = cv2.projectPoints(camera_points, np.zeros(3), np.zeros(3), camera.K, camera.D)
-    return pnp.to_image_points(pixels), camera_points[:, 2]
-
-
-def object_positions_in_reference(objects, calibration, pose):
-    """Depth-cluster centers -> RGB pixels -> existing PnP camera -> reference."""
-    points = np.array([obj.centroid_xyz for obj in objects], dtype=float).reshape(-1, 3)
-    return depth_points_to_reference(points, calibration, pose)
-
-
-def depth_points_to_reference(points, calibration, pose):
-    """Measured depth-camera points -> reference, respecting PnP pixel axes."""
-    points = np.asarray(points, dtype=float).reshape(-1, 3)
-    if not len(points):
-        return points
-    transform = calibration.depth_to_color
-    points = points @ transform[:3, :3].T + transform[:3, 3]
-    camera = calibration.color
-    pixels, _ = cv2.projectPoints(points, np.zeros(3), np.zeros(3), camera.K, camera.D)
-    pixels = pose[1].to_image_points(pixels).astype(np.float64).reshape(-1, 1, 2)
-    xy = cv2.undistortPoints(pixels, camera.K, camera.D).reshape(-1, 2)
-    pnp_points = np.column_stack((xy*points[:, 2:3], points[:, 2]))
-    camera_to_reference = np.linalg.inv(pose[0])
-    return pnp_points @ camera_to_reference[:3, :3].T + camera_to_reference[:3, 3]
-
-
-def reference_points_to_depth(points, calibration, pose):
-    """Inverse of depth_points_to_reference, including the board pixel mapping."""
-    if not len(points):
-        return np.empty((0, 3))
-    pixels, z = reference_points_to_image(points, pose, calibration.color)
-    camera = calibration.color
-    xy = cv2.undistortPoints(pixels.astype(np.float64).reshape(-1, 1, 2), camera.K, camera.D).reshape(-1, 2)
-    points = np.column_stack((xy*z[:, None], z))
-    transform = np.linalg.inv(calibration.depth_to_color)
+def reference_positions(detections, calibration, pose):
+    transform = pose.camera_to_reference @ calibration.depth_to_color
+    points = np.array([d.centroid for d in detections], dtype=float).reshape(-1, 3)
     return points @ transform[:3, :3].T + transform[:3, 3]
+
+
+def rgb_ownership(frame, detections, calibration, stride=2, scale=1.):
+    """Sparse RGB labels, nearest measured depth wins, including non-object depth.
+
+    Output is native RGB resolution with -1 for unknown/background. The stride
+    selects exact native depth rays, consistent with tabletop decimation.
+    """
+    c = calibration
+    if np.any(c.depth.D):
+        raise ValueError('Depth must be rectified')
+    y, x = np.mgrid[stride-1:c.depth.height:stride, stride-1:c.depth.width:stride]
+    z = frame.depth[y, x]
+    valid = np.isfinite(z) & (z > 0)
+    y, x, z = y[valid], x[valid], z[valid]
+    k = c.depth.K
+    points = np.column_stack(((x-k[0, 2])*z/k[0, 0], (y-k[1, 2])*z/k[1, 1], z))
+    # These are tiny 3D operations over many points; avoid BLAS thread startup.
+    points = np.einsum('ij,kj->ki', c.depth_to_color[:3, :3], points) + c.depth_to_color[:3, 3]
+    keep = points[:, 2] > 0
+    points, y, x = points[keep], y[keep], x[keep]
+    height, width = round(c.color.height*scale), round(c.color.width*scale)
+    result = np.full((height, width), -1, np.int32)
+    if not len(points):
+        return result
+    if np.any(c.color.D):
+        pixels = cv2.projectPoints(points, np.zeros(3), np.zeros(3), c.color.K, c.color.D)[0].reshape(-1, 2)
+    else:
+        pixels = points[:, :2]/points[:, 2, None]*[c.color.K[0, 0], c.color.K[1, 1]]+c.color.K[:2, 2]
+    pixels = np.floor((pixels+.5)*[width/c.color.width, height/c.color.height]).astype(int)
+    u, v = pixels.T
+    keep = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    u, v, points, y, x = u[keep], v[keep], points[keep], y[keep], x[keep]
+    keys = v*width+u
+    order = np.lexsort((points[:, 2], keys))
+    _, first = np.unique(keys[order], return_index=True)
+    nearest = order[first]
+    labels = np.full(len(x), -1, np.int32)
+    for i, detection in enumerate(detections):
+        labels[detection.mask[y, x]] = i
+    result[v[nearest], u[nearest]] = labels[nearest]
+    return result
